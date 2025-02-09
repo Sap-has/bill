@@ -18,6 +18,7 @@ import shutil
 
 category_order = ["Mortgage", "Food", "Gas", "Mechanic", "Work Clothes", "Materials", "Miscellaneous", "Doctor", "Equipment & Rent", "Cash"]
 
+#change 
 class TrieNode:
     def __init__(self):
         self.children = {}
