@@ -1,0 +1,4 @@
+PyQt5>=5.15.0
+numpy>=1.19.0
+mindee>=3.0.0
+Pillow>=8.0.0 

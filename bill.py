@@ -3,8 +3,6 @@ import json
 from datetime import datetime
 import sys
 import os
-import re
-import tempfile
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QGridLayout, QWidget, QPushButton, QTableWidget, QTableWidgetItem, 
@@ -12,25 +10,154 @@ from PyQt5.QtWidgets import (
     QScrollArea, QDialog, QProgressBar, QCheckBox, QMenu
 )
 from PyQt5.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog, QPageSetupDialog
-from PyQt5.QtGui import QPixmap, QImage
+from PyQt5.QtGui import QPixmap
 
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 import sqlite3
 import shutil
 
-# Try to import OCR libraries
+# Try to import Mindee API
 try:
-    import pytesseract
-    from PIL import Image
-    import cv2
+    # from mindee import Client, PredictResponse, product
+    from mindee import Client, product
+    print("Mindee import successful")
     HAS_OCR = True
-except ImportError:
+except ImportError as e:
+    print(f"Mindee import failed: {e}")
     HAS_OCR = False
 
 # Define constants
 DATE_FORMAT = "%m/%d/%Y"
 DATE_FORMATS = ["%m/%d/%y", "%m/%d/%Y"]
 DEFAULT_CATEGORIES = ["Mortgage", "Food", "Gas", "Mechanic", "Work Clothes", "Materials", "Miscellaneous", "Doctor", "Equipment & Rent", "Cash"]
+
+# Mindee OCR Helper class
+class MindeeHelper:
+    """Helper class for Mindee API integration."""
+    
+    # Static variable to hold the API key
+    api_key = None
+    mindee_client = None
+    
+    @staticmethod
+    def is_available():
+        """Check if Mindee OCR is available (API key is set).
+        
+        Returns:
+            bool: True if Mindee is available, False otherwise.
+        """
+        return HAS_OCR and MindeeHelper.api_key is not None
+    
+    @staticmethod
+    def set_api_key(api_key):
+        """Set the Mindee API key.
+        
+        Args:
+            api_key: The API key to use for Mindee.
+            
+        Returns:
+            bool: True if API key was set successfully, False otherwise.
+        """
+        try:
+            MindeeHelper.api_key = api_key
+            MindeeHelper.mindee_client = Client(api_key=api_key)
+            return True
+        except Exception as e:
+            print(f"Error setting Mindee API key: {e}")
+            return False
+    
+    @staticmethod
+    def load_api_key():
+        """Load the API key from the config file.
+        
+        Returns:
+            bool: True if API key was loaded successfully, False otherwise.
+        """
+        try:
+            if os.path.exists('mindee_api_key.txt'):
+                with open('mindee_api_key.txt', 'r') as f:
+                    api_key = f.read().strip()
+                    if api_key:
+                        return MindeeHelper.set_api_key(api_key)
+            return False
+        except Exception as e:
+            print(f"Error loading Mindee API key: {e}")
+            return False
+
+# OCR Worker Thread
+class MindeeWorker(QThread):
+    """Worker thread for processing receipt images with Mindee API."""
+    
+    # Signals
+    progress = pyqtSignal(int)
+    finished = pyqtSignal(dict)
+    
+    def __init__(self, image_path):
+        """Initialize the worker with the image path.
+        
+        Args:
+            image_path: Path to the receipt image.
+        """
+        super().__init__()
+        self.image_path = image_path
+    
+    def run(self):
+        """Process the receipt image using Mindee API."""
+        try:
+            if not MindeeHelper.is_available():
+                raise Exception("Mindee API key is not set")
+            
+            # Signal progress updates
+            self.progress.emit(10)
+            
+            # Initialize result dictionary
+            result = {
+                "vendor": "",
+                "date": "",
+                "amount": ""
+            }
+            
+            # Open the input file
+            self.progress.emit(30)
+            
+            # Create a receipt prediction using Mindee API
+            input_doc = MindeeHelper.mindee_client.source_from_path(self.image_path)
+            self.progress.emit(50)
+            
+            # Parse receipt using the Receipt API - use the client to parse, not the input_doc
+            api_response = MindeeHelper.mindee_client.parse(product.ReceiptV5, input_doc)
+            self.progress.emit(80)
+            
+            prediction = api_response.document.inference.prediction
+
+            # Extract vendor name (supplier name in Mindee)
+            if hasattr(prediction, 'supplier_name') and prediction.supplier_name:
+                result["vendor"] = prediction.supplier_name.value
+
+            # Extract date
+            if hasattr(prediction, 'date') and prediction.date:
+                date_value = prediction.date.value
+                if isinstance(date_value, str):
+                    # Parse the string into a datetime object
+                    date_obj = datetime.strptime(date_value, "%Y-%m-%d")
+                else:
+                    # If it's already a datetime object
+                    date_obj = date_value
+                # Convert date to MM/DD/YYYY format
+                result["date"] = date_obj.strftime("%m/%d/%Y")
+
+            # Extract total amount
+            if hasattr(prediction, 'total_amount') and prediction.total_amount:
+                result["amount"] = str(prediction.total_amount.value)
+            self.progress.emit(100)
+            
+            # Emit the result
+            self.finished.emit(result)
+            
+        except Exception as e:
+            print(f"Error in Mindee processing: {e}")
+            # Emit empty result on error
+            self.finished.emit({"vendor": "", "date": "", "amount": ""})
 
 class DateHelper:
     """Helper class for handling date operations."""
@@ -185,22 +312,22 @@ class TranslationManager:
         "Failed to delete bill. Please try again.": {"es": "Error al eliminar factura. Intente nuevamente."},
         
         # Categories (default)
-        "Mortgage": {"es": "Hipoteca"},
-        "Food": {"es": "Alimentos"},
-        "Gas": {"es": "Gasolina"},
-        "Mechanic": {"es": "Mecánico"},
-        "Work Clothes": {"es": "Ropa de Trabajo"},
-        "Materials": {"es": "Materiales"},
-        "Miscellaneous": {"es": "Varios"},
+        "Mortgage": {"es": "Mortgage"},
+        "Food": {"es": "Food"},
+        "Gas": {"es": "Gas"},
+        "Mechanic": {"es": "Mechanic"},
+        "Work Clothes": {"es": "Clothes"},
+        "Materials": {"es": "Materials"},
+        "Miscellaneous": {"es": "Miscellaneous"},
         "Doctor": {"es": "Doctor"},
-        "Equipment & Rent": {"es": "Equipo y Alquiler"},
-        "Cash": {"es": "Efectivo"},
+        "Equipment & Rent": {"es": "Equipment & Rent"},
+        "Cash": {"es": "Cash"},
         
         # Date placeholders
         "MM/dd/yyyy": {"es": "MM/dd/aaaa"},
         
         # Other
-        "Present Database": {"es": "Base de Datos Actual"},
+        "Present Database": {"es": "Base de Datos presente"},
         "Bill Tracker": {"es": "Seguimiento de Facturas"},
         "Language": {"es": "Idioma"},
         "English": {"es": "Inglés"},
@@ -381,309 +508,6 @@ class SettingsManager:
         """
         with open("categories.json", "w") as file:
             json.dump(categories, file)
-
-class OCRHelper:
-    """Helper class for OCR (Optical Character Recognition) processing of bill images."""
-    
-    # Default Tesseract path locations to check
-    TESSERACT_PATHS = [
-        r'C:\Program Files\Tesseract-OCR\tesseract.exe',
-        r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
-        '/usr/bin/tesseract',
-        '/usr/local/bin/tesseract'
-    ]
-    
-    # Custom path set by user (if any)
-    custom_tesseract_path = None
-    
-    @staticmethod
-    def set_tesseract_path(path):
-        """Set a custom path for the Tesseract executable.
-        
-        Args:
-            path: Path to the Tesseract executable.
-            
-        Returns:
-            bool: True if the path is valid, False otherwise.
-        """
-        if os.path.exists(path) and os.path.isfile(path):
-            OCRHelper.custom_tesseract_path = path
-            pytesseract.pytesseract.tesseract_cmd = path
-            return True
-        return False
-    
-    @staticmethod
-    def configure_tesseract():
-        """Configure Tesseract with the best available path.
-        
-        Returns:
-            bool: True if configuration successful, False otherwise.
-        """
-        # First check if custom path is set
-        if OCRHelper.custom_tesseract_path:
-            pytesseract.pytesseract.tesseract_cmd = OCRHelper.custom_tesseract_path
-            return True
-            
-        # Try to automatically find Tesseract
-        # First, check common installation paths
-        for path in OCRHelper.TESSERACT_PATHS:
-            if os.path.exists(path) and os.path.isfile(path):
-                pytesseract.pytesseract.tesseract_cmd = path
-                return True
-        
-        # If not found in common paths, rely on system PATH
-        return True  # Return True and let it fail naturally if not found
-    
-    @staticmethod
-    def is_available():
-        """Check if OCR functionality is available.
-        
-        Returns:
-            bool: True if OCR is available, False otherwise.
-        """
-        if not HAS_OCR:
-            return False
-            
-        try:
-            # Try to configure Tesseract
-            OCRHelper.configure_tesseract()
-            
-            # Create a small test image
-            import numpy as np
-            test_img = np.zeros((50, 100), dtype=np.uint8)
-            test_img.fill(255)
-            
-            # Save test image to a temporary file
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp:
-                temp_path = temp.name
-                cv2.imwrite(temp_path, test_img)
-            
-            # Try to run OCR on the test image
-            pytesseract.image_to_string(Image.open(temp_path))
-            
-            # Remove the test file
-            os.unlink(temp_path)
-            
-            return True
-        except Exception as e:
-            print(f"OCR availability check failed: {e}")
-            return False
-    
-    @staticmethod
-    def preprocess_image(image_path):
-        """Preprocess the image to improve OCR accuracy.
-        
-        Args:
-            image_path: Path to the image file.
-            
-        Returns:
-            numpy.ndarray: Preprocessed image or None if preprocessing failed.
-        """
-        try:
-            # Read the image
-            img = cv2.imread(image_path)
-            
-            # Convert to grayscale
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            
-            # Apply threshold to get black and white image
-            _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            
-            # Noise removal
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-            opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
-            
-            return opening
-        except Exception as e:
-            print(f"Error preprocessing image: {e}")
-            return None
-    
-    @staticmethod
-    def extract_text(image_path):
-        """Extract text from an image using OCR.
-        
-        Args:
-            image_path: Path to the image file.
-            
-        Returns:
-            str: Extracted text or empty string if extraction failed.
-        """
-        if not HAS_OCR:
-            return ""
-            
-        try:
-            # Configure Tesseract
-            OCRHelper.configure_tesseract()
-            
-            # Preprocess the image
-            processed_img = OCRHelper.preprocess_image(image_path)
-            
-            if processed_img is None:
-                # If preprocessing failed, use the original image
-                text = pytesseract.image_to_string(Image.open(image_path))
-            else:
-                # Save the processed image to a temporary file
-                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp:
-                    temp_path = temp.name
-                    cv2.imwrite(temp_path, processed_img)
-                
-                # Extract text from the processed image
-                text = pytesseract.image_to_string(Image.open(temp_path))
-                
-                # Remove the temporary file
-                os.unlink(temp_path)
-                
-            return text
-        except Exception as e:
-            error_msg = str(e)
-            print(f"Error extracting text: {error_msg}")
-            
-            if "tesseract is not installed" in error_msg or "not in your PATH" in error_msg:
-                raise RuntimeError("tesseract is not installed or it's not in your PATH. See OCR_INSTALL.md file for more information.")
-            
-            return ""
-    
-    @staticmethod
-    def parse_receipt(text):
-        """Parse the extracted text to find bill information.
-        
-        Args:
-            text: Text extracted from the receipt.
-            
-        Returns:
-            dict: Dictionary containing extracted information (date, vendor, amount).
-        """
-        result = {
-            "date": None,
-            "vendor": None,
-            "amount": None
-        }
-        
-        if not text:
-            return result
-        
-        lines = text.strip().split('\n')
-
-        for i, line in enumerate(lines[:5]):  # Check first 5 lines
-            line = line.strip()
-            if line and len(line) > 2:
-                # Check if it's not just a date or number
-                if not re.match(r'^[\d\W]+$', line):
-                    result["vendor"] = line
-                    break
-
-        # Try to extract date
-        date_patterns = [
-            # Common US date formats
-            r'\b(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})\b',  # MM/DD/YYYY or DD/MM/YYYY
-            
-            # Look for explicit date indicators
-            r'date\s*:?\s*(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})',  # "date: MM/DD/YYYY"
-            r'date\s*:?\s*(\d{2,4}[/\-\.]\d{1,2}[/\-\.]\d{1,2})',  # "date: YYYY/MM/DD"
-            
-            # Look for explicit date word
-            r'\b(\d{2})[\.-/](\d{2})[\.-/](\d{2,4})\b'  # DD.MM.YYYY or MM.DD.YYYY
-        ]
-
-        for line in lines:
-            line_lower = line.lower()
-            # If line contains the word "date", prioritize it
-            if 'date' in line_lower:
-                for pattern in date_patterns:
-                    date_matches = re.findall(pattern, line, re.IGNORECASE)
-                    if date_matches:
-                        date_text = date_matches[0]
-                        if isinstance(date_text, tuple):
-                            date_text = f"{date_text[0]}/{date_text[1]}/{date_text[2]}"
-                        result["date"] = date_text
-                        break
-                if result["date"]:
-                    break
-        
-        if not result["date"]:
-            for line in lines:
-                for pattern in date_patterns:
-                    date_matches = re.findall(pattern, line)
-                    if date_matches:
-                        date_text = date_matches[0]
-                        if isinstance(date_text, tuple):
-                            date_text = f"{date_text[0]}/{date_text[1]}/{date_text[2]}"
-                        result["date"] = date_text
-                        break
-                if result["date"]:
-                    break
-        
-        # Try to extract amount (looking for currency symbols, 'total', etc.)
-        total_patterns = [
-            # Look for explicit total indicators
-            r'(?:total|amount|sale total|grand total|balance)\s*:?\s*\$?\s*(\d+\.\d{2})',  # "total: $XX.XX" 
-            r'(?:total|amount|sale total|grand total|balance)\s*:?\s*\$?\s*(\d+,\d{3}\.\d{2})',  # "total: $X,XXX.XX"
-            
-            # Look for $ symbol with numbers
-            r'\$\s*(\d+\.\d{2})',  # $XX.XX
-            r'\$\s*(\d+,\d{3}\.\d{2})',  # $X,XXX.XX
-            
-            # Fallback - look for decimal numbers near total-related words
-            r'(?:total|amount|sale|balance).*?(\d+\.\d{2})',  # "total ... XX.XX"
-            r'(\d+\.\d{2}).*?(?:total|amount|sale|balance)',  # "XX.XX ... total"
-        ]
-        
-        for line in lines:
-            line_lower = line.lower()
-            if any(word in line_lower for word in ['total', 'amount', 'balance', 'sale']):
-                for pattern in total_patterns:
-                    amount_matches = re.findall(pattern, line_lower)
-                    if amount_matches:
-                        # Take the last match if multiple found (often the total is after subtotal)
-                        result["total"] = amount_matches[-1].replace(',', '')
-                        break
-                
-                # If we found an amount in a line with "total", prioritize it
-                if result["total"]:
-                    break
-        
-        if not result["total"]:
-            all_amounts = []
-            for line in lines:
-                amounts = re.findall(r'\$?\s*(\d+\.\d{2})', line)
-                all_amounts.extend(amounts)
-            
-            # If we found multiple amounts, take the largest one as likely the total
-            if all_amounts:
-                all_amounts = [float(amt.replace(',', '')) for amt in all_amounts]
-                result["total"] = str(max(all_amounts))
-        
-        return result
-
-class OCRWorker(QThread):
-    """Worker thread for OCR processing to keep the UI responsive."""
-    
-    finished = pyqtSignal(dict)
-    progress = pyqtSignal(int)
-    
-    def __init__(self, image_path):
-        super().__init__()
-        self.image_path = image_path
-        
-    def run(self):
-        """Run the OCR processing in a separate thread."""
-        # Update progress
-        self.progress.emit(10)
-        
-        # Extract text from the image
-        text = OCRHelper.extract_text(self.image_path)
-        
-        # Update progress
-        self.progress.emit(70)
-        
-        # Parse the extracted text
-        result = OCRHelper.parse_receipt(text)
-        
-        # Update progress
-        self.progress.emit(100)
-        
-        # Emit the result
-        self.finished.emit(result)
 
 class TrieNode:
     def __init__(self):
@@ -1083,14 +907,14 @@ class OCRResultsDialog(QDialog):
         """
         return self.result
 
-class TesseractConfigDialog(QDialog):
-    """Dialog for configuring Tesseract OCR path."""
+class MindeeAPIConfigDialog(QDialog):
+    """Dialog for configuring Mindee API key."""
     
     def __init__(self, parent=None):
-        """Initialize the dialog for configuring Tesseract path."""
+        """Initialize the dialog for configuring Mindee API key."""
         super().__init__(parent)
         
-        self.setWindowTitle(UIHelper.translate("Configure Tesseract Path"))
+        self.setWindowTitle(UIHelper.translate("Configure Mindee API"))
         self.setFixedWidth(500)
         
         # Create layout
@@ -1099,32 +923,33 @@ class TesseractConfigDialog(QDialog):
         
         # Add explanation
         info_label = QLabel(UIHelper.translate(
-            "If Tesseract OCR is installed but not detected automatically, "
-            "you can set the path to the executable manually below."
+            "To use the Mindee Receipt OCR API, you need to enter your API key. "
+            "You can get an API key by signing up at https://mindee.com."
         ))
         info_label.setWordWrap(True)
         layout.addWidget(info_label)
         
-        # Path input
-        path_layout = QHBoxLayout()
-        path_label = QLabel(UIHelper.translate("Tesseract Path:"))
-        path_layout.addWidget(path_label)
+        # API key input
+        key_layout = QHBoxLayout()
+        key_label = QLabel(UIHelper.translate("API Key:"))
+        key_layout.addWidget(key_label)
         
-        self.path_input = QLineEdit()
-        if OCRHelper.custom_tesseract_path:
-            self.path_input.setText(OCRHelper.custom_tesseract_path)
-        path_layout.addWidget(self.path_input)
+        self.key_input = QLineEdit()
+        if MindeeHelper.api_key:
+            self.key_input.setText(MindeeHelper.api_key)
+        self.key_input.setEchoMode(QLineEdit.Password)  # Hide the API key for security
+        key_layout.addWidget(self.key_input)
         
-        self.browse_button = QPushButton("...")
-        self.browse_button.setFixedWidth(40)
-        self.browse_button.clicked.connect(self.browse_for_tesseract)
-        path_layout.addWidget(self.browse_button)
+        layout.addLayout(key_layout)
         
-        layout.addLayout(path_layout)
+        # Show/hide API key checkbox
+        self.show_key_checkbox = QCheckBox(UIHelper.translate("Show API Key"))
+        self.show_key_checkbox.toggled.connect(self.toggle_key_visibility)
+        layout.addWidget(self.show_key_checkbox)
         
         # Test button
-        self.test_button = QPushButton(UIHelper.translate("Test OCR"))
-        self.test_button.clicked.connect(self.test_tesseract)
+        self.test_button = QPushButton(UIHelper.translate("Test API Key"))
+        self.test_button.clicked.connect(self.test_api_key)
         layout.addWidget(self.test_button)
         
         # Status label
@@ -1136,7 +961,7 @@ class TesseractConfigDialog(QDialog):
         buttons_layout = QHBoxLayout()
         
         self.save_button = QPushButton(UIHelper.translate("Save"))
-        self.save_button.clicked.connect(self.save_path)
+        self.save_button.clicked.connect(self.save_api_key)
         buttons_layout.addWidget(self.save_button)
         
         self.cancel_button = QPushButton(UIHelper.translate("Cancel"))
@@ -1145,95 +970,58 @@ class TesseractConfigDialog(QDialog):
         
         layout.addLayout(buttons_layout)
     
-    def browse_for_tesseract(self):
-        """Open a file dialog to browse for the Tesseract executable."""
-        options = QFileDialog.Options()
-        file_filter = "Executable Files (*.exe);;All Files (*)" if sys.platform == 'win32' else "All Files (*)"
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, 
-            UIHelper.translate("Select Tesseract Executable"), 
-            "", 
-            file_filter, 
-            options=options
-        )
-        
-        if file_path:
-            self.path_input.setText(file_path)
+    def toggle_key_visibility(self, checked):
+        """Toggle the visibility of the API key input."""
+        if checked:
+            self.key_input.setEchoMode(QLineEdit.Normal)
+        else:
+            self.key_input.setEchoMode(QLineEdit.Password)
     
-    def test_tesseract(self):
-        """Test if the specified Tesseract path works."""
-        path = self.path_input.text()
+    def test_api_key(self):
+        """Test if the specified API key works with Mindee."""
+        api_key = self.key_input.text()
         
-        if not path:
-            self.status_label.setText(UIHelper.translate("Please enter a Tesseract path"))
+        if not api_key:
+            self.status_label.setText(UIHelper.translate("Please enter an API key"))
             self.status_label.setStyleSheet("color: red; font-weight: bold;")
             return
         
-        if not os.path.exists(path) or not os.path.isfile(path):
-            self.status_label.setText(UIHelper.translate("Invalid Tesseract path"))
-            self.status_label.setStyleSheet("color: red; font-weight: bold;")
-            return
-        
-        # Set the path temporarily
-        original_path = pytesseract.pytesseract.tesseract_cmd
-        pytesseract.pytesseract.tesseract_cmd = path
-        
+        # Try to initialize the client with the API key
         try:
-            # Create a simple test image
-            import numpy as np
-            test_img = np.zeros((50, 200), dtype=np.uint8)
-            test_img.fill(255)
-            
-            # Save to a temporary file
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp:
-                temp_path = temp.name
-                cv2.imwrite(temp_path, test_img)
-            
-            # Try OCR
-            pytesseract.image_to_string(Image.open(temp_path))
-            
-            # Clean up
-            os.unlink(temp_path)
+            # Set the API key temporarily
+            client = Client(api_key=api_key)
             
             # Success
-            self.status_label.setText(UIHelper.translate("OCR Testing Successful"))
+            self.status_label.setText(UIHelper.translate("API Key is valid"))
             self.status_label.setStyleSheet("color: green; font-weight: bold;")
             
         except Exception as e:
             # Failure
-            self.status_label.setText(UIHelper.translate("OCR Test Failed") + f": {str(e)}")
+            self.status_label.setText(UIHelper.translate("API Key validation failed") + f": {str(e)}")
             self.status_label.setStyleSheet("color: red; font-weight: bold;")
-        
-        # Restore original path
-        pytesseract.pytesseract.tesseract_cmd = original_path
     
-    def save_path(self):
-        """Save the Tesseract path if valid."""
-        path = self.path_input.text()
+    def save_api_key(self):
+        """Save the Mindee API key if valid."""
+        api_key = self.key_input.text()
         
-        if not path:
-            self.status_label.setText(UIHelper.translate("Please enter a Tesseract path"))
+        if not api_key:
+            self.status_label.setText(UIHelper.translate("Please enter an API key"))
             self.status_label.setStyleSheet("color: red; font-weight: bold;")
             return
         
-        if not os.path.exists(path) or not os.path.isfile(path):
-            self.status_label.setText(UIHelper.translate("Invalid Tesseract path"))
-            self.status_label.setStyleSheet("color: red; font-weight: bold;")
-            return
-        
-        # Set the path
-        if OCRHelper.set_tesseract_path(path):
-            # Save the path to a file
+        # Set the API key
+        if MindeeHelper.set_api_key(api_key):
+            # Save the API key to a file
             try:
-                with open('tesseract_path.txt', 'w') as f:
-                    f.write(path)
+                with open('mindee_api_key.txt', 'w') as f:
+                    f.write(api_key)
             except Exception as e:
-                print(f"Error saving tesseract path: {e}")
+                print(f"Error saving Mindee API key: {e}")
             
-            # Path set successfully
+            # API key set successfully
             self.accept()
         else:
-            self.status_label.setText(UIHelper.translate("Failed to set Tesseract path"))
+            self.status_label.setText(UIHelper.translate("Failed to set API key"))
             self.status_label.setStyleSheet("color: red; font-weight: bold;")
 
 # Main Application Class
@@ -1292,24 +1080,12 @@ class BillTracker(QMainWindow):
         self.load_names_into_trie()
     
     def setup_ocr(self):
-        """Set up OCR functionality by trying to find Tesseract."""
+        """Set up OCR functionality by loading Mindee API key."""
         if not HAS_OCR:
             return
         
-        # Try to locate Tesseract in well-known paths
-        # First, check if there's a tesseract_path.txt file
-        try:
-            if os.path.exists('tesseract_path.txt'):
-                with open('tesseract_path.txt', 'r') as f:
-                    path = f.read().strip()
-                    if path and os.path.exists(path) and os.path.isfile(path):
-                        OCRHelper.set_tesseract_path(path)
-                        return
-        except Exception as e:
-            print(f"Error reading tesseract_path.txt: {e}")
-        
-        # Try to locate Tesseract automatically
-        OCRHelper.configure_tesseract()
+        # Try to load the API key
+        MindeeHelper.load_api_key()
     
     def init_toolbar(self):
         """Initialize the toolbar with language options."""
@@ -1350,9 +1126,9 @@ class BillTracker(QMainWindow):
         self.update_widget_translations(self)
         
         # Update OCR button tooltip if OCR is not available
-        if hasattr(self, 'scan_button') and not OCRHelper.is_available():
+        if hasattr(self, 'scan_button') and not MindeeHelper.is_available():
             self.scan_button.setToolTip(UIHelper.translate(
-                "OCR functionality requires pytesseract, Pillow, and OpenCV. Please install these packages to use receipt scanning."
+                "OCR functionality requires Mindee API. Please configure your API key to use receipt scanning."
             ))
         
         # Refresh tables with translated headers
@@ -1379,243 +1155,38 @@ class BillTracker(QMainWindow):
         # Update category buttons
         for category, button in self.category_buttons.items():
             button.setText(UIHelper.translate(category))
-    
-    def update_widget_translations(self, parent_widget):
-        """Recursively update translations of all child widgets.
-        
-        Args:
-            parent_widget: The parent widget to update
-        """
-        for child in parent_widget.findChildren(QWidget):
-            # Update QPushButton text
-            if isinstance(child, QPushButton) and child.property("original_text"):
-                child.setText(UIHelper.translate(child.property("original_text")))
-                
-            # Update QLabel text
-            elif isinstance(child, QLabel) and child.property("original_text"):
-                child.setText(UIHelper.translate(child.property("original_text")))
-                
-            # Update QLineEdit placeholder
-            elif isinstance(child, QLineEdit) and child.property("original_placeholder"):
-                child.setPlaceholderText(UIHelper.translate(child.property("original_placeholder")))
-                
-            # Recursively update child widgets
-            if child.children():
-                self.update_widget_translations(child)
-
-    def load_names_into_trie(self):
-        # Load names from unique_names.json and insert them into the trie
-        with open('unique_names.json', 'r') as file:
-            names = json.load(file)
-        for name in names:
-            self.trie.insert(name)
-
-    def init_print_page(self):
-        """Initialize the Print Page tab with filter and display options."""
-        self.print_page = QWidget()
-        self.print_layout = QVBoxLayout()
-        self.print_page.setLayout(self.print_layout)
-
-        # Section: Date range filter
-        self.print_layout.addWidget(UIHelper.create_section_label("Filter Bills by Date Range"))
-        
-        # Date Range Inputs
-        date_range_layout = QHBoxLayout()
-        
-        self.start_date_input = UIHelper.create_date_input()
-        date_range_layout.addWidget(self.start_date_input)
-        
-        self.end_date_input = UIHelper.create_date_input()
-        date_range_layout.addWidget(self.end_date_input)
-        
-        self.print_layout.addLayout(date_range_layout)
-        
-        # Filter button
-        self.filter_button = UIHelper.create_button("Filter by Date Range", self.filter_by_date_range)
-        self.print_layout.addWidget(self.filter_button)
-        
-        UIHelper.add_section_spacing(self.print_layout)
-        
-        # Section: Sort options
-        self.print_layout.addWidget(UIHelper.create_section_label("Sort Options"))
-        
-        # Sort buttons
-        sort_buttons_layout = QHBoxLayout()
-        
-        self.sort_asc_button = UIHelper.create_button("Sort by Date (Ascending)", lambda: self.sort_table("asc"))
-        sort_buttons_layout.addWidget(self.sort_asc_button)
-        
-        self.sort_desc_button = UIHelper.create_button("Sort by Date (Descending)", lambda: self.sort_table("desc"))
-        sort_buttons_layout.addWidget(self.sort_desc_button)
-        
-        self.print_layout.addLayout(sort_buttons_layout)
-        
-        UIHelper.add_section_spacing(self.print_layout)
-        
-        # Section: Actions
-        self.print_layout.addWidget(UIHelper.create_section_label("Actions"))
-        
-        # Print and Show All Bills buttons
-        buttons_layout = QHBoxLayout()
-        
-        self.print_button = UIHelper.create_button("Print Bills", self.print_bills)
-        buttons_layout.addWidget(self.print_button)
-        
-        self.show_all_button = UIHelper.create_button("Show All Bills", self.load_bills)
-        buttons_layout.addWidget(self.show_all_button)
-        
-        self.print_layout.addLayout(buttons_layout)
-        
-        UIHelper.add_section_spacing(self.print_layout)
-        
-        # Section: Database Selection
-        self.print_layout.addWidget(UIHelper.create_section_label("Select Year"))
-        
-        # Database selection dropdown
-        self.year_selector = QComboBox()
-        self.year_selector.addItem("Present Database")
-        self.year_selector.currentIndexChanged.connect(self.load_bills)
-        self.print_layout.addWidget(self.year_selector)
-        
-        UIHelper.add_section_spacing(self.print_layout)
-        
-        # Section: Bills Table
-        self.print_layout.addWidget(UIHelper.create_section_label("Bills"))
-        
-        # Table to display bills
-        self.bill_table = UIHelper.create_table(3, ["Date", "Name", "Price"])
-        self.print_layout.addWidget(self.bill_table)
-
-    def init_bill_page(self):
-        """Initialize the Bill Entry tab with form and category selection."""
-        self.bill_page = QWidget()
-        self.bill_layout = QVBoxLayout()
-        self.bill_page.setLayout(self.bill_layout)
-
-        # Section: Date Selection
-        self.bill_layout.addWidget(UIHelper.create_section_label("Select Date"))
-        
-        # Calendar
-        self.calendar = QCalendarWidget()
-        self.calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
-        self.bill_layout.addWidget(self.calendar)
-
-        # Manual date input
-        self.date_input = UIHelper.create_date_input()
-        self.bill_layout.addWidget(self.date_input)
-        
-        UIHelper.add_section_spacing(self.bill_layout)
-        
-        # Section: Bill Details
-        self.bill_layout.addWidget(UIHelper.create_section_label("Bill Details"))
-
-        # Name input
-        self.name_input = UIHelper.create_input_field("Enter bill name")
-        self.name_input.textChanged.connect(self.show_autocomplete_suggestions)
-        self.bill_layout.addWidget(self.name_input)
-
-        # Autocomplete suggestions list
-        self.suggestions_list = QListWidget()
-        self.suggestions_list.setFixedHeight(150)
-        self.suggestions_list.itemClicked.connect(self.select_suggestion)
-        self.bill_layout.addWidget(self.suggestions_list)
-
-        # Amount input
-        self.price_input = UIHelper.create_input_field("Enter price")
-        self.bill_layout.addWidget(self.price_input)
-        
-        UIHelper.add_section_spacing(self.bill_layout)
-        
-        # Section: Categories
-        self.bill_layout.addWidget(UIHelper.create_section_label("Select Categories"))
-        
-        # Category buttons
-        self.category_buttons = {}
-        self.categories = self.predefined_order
-        self.category_layout = QGridLayout()
-        
-        for i, category in enumerate(self.categories):
-            button = UIHelper.create_button(category, partial(self.add_category, category))
-            self.category_layout.addWidget(button, i // 5, i % 5)
-            self.category_buttons[category] = button
-            
-        self.bill_layout.addLayout(self.category_layout)
-        
-        UIHelper.add_section_spacing(self.bill_layout)
-        
-        # Section: Add Photo
-        self.bill_layout.addWidget(UIHelper.create_section_label("Bill Photo"))
-
-        # Image buttons layout
-        image_buttons_layout = QHBoxLayout()
-        
-        # Image selection button
-        self.image_button = UIHelper.create_button("Add Photo", self.select_photo)
-        image_buttons_layout.addWidget(self.image_button)
-        
-        # OCR scan button (if OCR is available)
-        self.scan_button = UIHelper.create_button("Scan Receipt", self.scan_receipt)
-        self.scan_button.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.scan_button.customContextMenuRequested.connect(self.show_scan_context_menu)
-        image_buttons_layout.addWidget(self.scan_button)
-        
-        # Check OCR availability and update the scan button state
-        self.update_scan_button_state()
-        
-        self.bill_layout.addLayout(image_buttons_layout)
-
-        # Image preview
-        self.image_preview = QLabel()
-        self.image_preview.setFixedSize(200, 200)
-        self.image_preview.setScaledContents(True)
-        self.bill_layout.addWidget(self.image_preview)
-        
-        UIHelper.add_section_spacing(self.bill_layout)
-        
-        # Section: Save
-        self.save_button = UIHelper.create_button("Save Bill", self.save_bill)
-        self.bill_layout.addWidget(self.save_button)
-        
-        UIHelper.add_section_spacing(self.bill_layout)
-        
-        # Section: Recent Bills
-        self.bill_layout.addWidget(UIHelper.create_section_label("Recent Bills"))
-        
-        # Table to display bills (only present database)
-        self.present_bill_table = UIHelper.create_table(3, ["Date", "Name", "Price"])
-        self.bill_layout.addWidget(self.present_bill_table)
 
     def update_scan_button_state(self):
         """Update the scan button state based on OCR availability."""
-        is_ocr_available = OCRHelper.is_available()
+        is_ocr_available = MindeeHelper.is_available()
         self.scan_button.setEnabled(is_ocr_available)
         
         if not is_ocr_available:
             if not HAS_OCR:
                 # OCR libraries not installed
                 self.scan_button.setToolTip(UIHelper.translate(
-                    "OCR functionality requires pytesseract, Pillow, and OpenCV. Please install these packages to use receipt scanning."
+                    "OCR functionality requires Mindee API. Please install the Mindee package to use receipt scanning."
                 ))
             else:
-                # OCR libraries installed but Tesseract not found
+                # OCR libraries installed but API key not set
                 self.scan_button.setToolTip(UIHelper.translate(
-                    "Tesseract OCR not found. Right-click to configure Tesseract path."
+                    "Mindee API key not set. Right-click to configure API key."
                 ))
     
     def show_scan_context_menu(self, position):
         """Show a context menu for the scan button with OCR configuration options."""
         menu = QMenu(self)
         
-        # Add an action to configure Tesseract path
-        configure_action = menu.addAction(UIHelper.translate("Configure Tesseract Path"))
-        configure_action.triggered.connect(self.show_tesseract_config_dialog)
+        # Add an action to configure API key
+        configure_action = menu.addAction(UIHelper.translate("Configure Mindee API Key"))
+        configure_action.triggered.connect(self.show_mindee_config_dialog)
         
         # Show the menu at the requested position
         menu.exec_(self.scan_button.mapToGlobal(position))
     
-    def show_tesseract_config_dialog(self):
-        """Show the dialog for configuring Tesseract path."""
-        dialog = TesseractConfigDialog(self)
+    def show_mindee_config_dialog(self):
+        """Show the dialog for configuring Mindee API key."""
+        dialog = MindeeAPIConfigDialog(self)
         if dialog.exec_() == QDialog.Accepted:
             # Update the scan button state
             self.update_scan_button_state()
@@ -1627,8 +1198,21 @@ class BillTracker(QMainWindow):
             QMessageBox.warning(
                 self, 
                 UIHelper.translate("OCR Not Available"), 
-                UIHelper.translate("OCR functionality requires pytesseract, Pillow, and OpenCV. Please install these packages to use receipt scanning.")
+                UIHelper.translate("OCR functionality requires Mindee API. Please install the Mindee package to use receipt scanning.")
             )
+            return
+        
+        # Check if API key is set
+        if not MindeeHelper.is_available():
+            result = QMessageBox.question(
+                self, 
+                UIHelper.translate("API Key Not Set"), 
+                UIHelper.translate("Mindee API key is not set. Would you like to configure it now?"),
+                QMessageBox.Yes | QMessageBox.No
+            )
+                
+            if result == QMessageBox.Yes:
+                self.show_mindee_config_dialog()
             return
         
         # Select an image first
@@ -1666,7 +1250,7 @@ class BillTracker(QMainWindow):
         layout.addWidget(progress_bar)
         
         # Create worker thread for OCR processing
-        self.ocr_worker = OCRWorker(file_path)
+        self.ocr_worker = MindeeWorker(file_path)
         self.ocr_worker.progress.connect(progress_bar.setValue)
         self.ocr_worker.finished.connect(lambda results: self.handle_ocr_results(results, progress_dialog))
         
@@ -1680,17 +1264,17 @@ class BillTracker(QMainWindow):
             progress_dialog.accept()
             
             error_msg = str(e)
-            if "tesseract is not installed" in error_msg or "not in your PATH" in error_msg:
-                # Tesseract not found, prompt user to configure it
+            if "API key is not set" in error_msg:
+                # API key not set, prompt user to configure it
                 result = QMessageBox.question(
                     self, 
-                    UIHelper.translate("Tesseract Not Found"), 
-                    UIHelper.translate("Tesseract OCR is not installed or not in your PATH. Would you like to configure the Tesseract path manually?"),
+                    UIHelper.translate("API Key Not Set"), 
+                    UIHelper.translate("Mindee API key is not set. Would you like to configure it now?"),
                     QMessageBox.Yes | QMessageBox.No
                 )
                 
                 if result == QMessageBox.Yes:
-                    self.show_tesseract_config_dialog()
+                    self.show_mindee_config_dialog()
             else:
                 # Other error
                 QMessageBox.critical(
@@ -2392,7 +1976,7 @@ class BillTracker(QMainWindow):
             QLineEdit:focus {
                 border: 1px solid #80bdff;
                 outline: 0;
-                box-shadow: 0 0 0 0.2rem rgba(0, 123, 255, 0.25);
+                /* Remove box-shadow as it's not supported in PyQt CSS */
             }
             
             QPushButton {
@@ -2505,6 +2089,211 @@ class BillTracker(QMainWindow):
                 color: white;
             }
         """)
+
+    def update_widget_translations(self, parent_widget):
+        """Recursively update translations of all child widgets.
+        
+        Args:
+            parent_widget: The parent widget to update
+        """
+        for child in parent_widget.findChildren(QWidget):
+            # Update QPushButton text
+            if isinstance(child, QPushButton) and child.property("original_text"):
+                child.setText(UIHelper.translate(child.property("original_text")))
+                
+            # Update QLabel text
+            elif isinstance(child, QLabel) and child.property("original_text"):
+                child.setText(UIHelper.translate(child.property("original_text")))
+                
+            # Update QLineEdit placeholder
+            elif isinstance(child, QLineEdit) and child.property("original_placeholder"):
+                child.setPlaceholderText(UIHelper.translate(child.property("original_placeholder")))
+                
+            # Recursively update child widgets
+            if child.children():
+                self.update_widget_translations(child)
+
+    def load_names_into_trie(self):
+        # Load names from unique_names.json and insert them into the trie
+        with open('unique_names.json', 'r') as file:
+            names = json.load(file)
+        for name in names:
+            self.trie.insert(name)
+
+    def init_print_page(self):
+        """Initialize the Print Page tab with filter and display options."""
+        self.print_page = QWidget()
+        self.print_layout = QVBoxLayout()
+        self.print_page.setLayout(self.print_layout)
+
+        # Section: Date range filter
+        self.print_layout.addWidget(UIHelper.create_section_label("Filter Bills by Date Range"))
+        
+        # Date Range Inputs
+        date_range_layout = QHBoxLayout()
+        
+        self.start_date_input = UIHelper.create_date_input()
+        date_range_layout.addWidget(self.start_date_input)
+        
+        self.end_date_input = UIHelper.create_date_input()
+        date_range_layout.addWidget(self.end_date_input)
+        
+        self.print_layout.addLayout(date_range_layout)
+        
+        # Filter button
+        self.filter_button = UIHelper.create_button("Filter by Date Range", self.filter_by_date_range)
+        self.print_layout.addWidget(self.filter_button)
+        
+        UIHelper.add_section_spacing(self.print_layout)
+        
+        # Section: Sort options
+        self.print_layout.addWidget(UIHelper.create_section_label("Sort Options"))
+        
+        # Sort buttons
+        sort_buttons_layout = QHBoxLayout()
+        
+        self.sort_asc_button = UIHelper.create_button("Sort by Date (Ascending)", lambda: self.sort_table("asc"))
+        sort_buttons_layout.addWidget(self.sort_asc_button)
+        
+        self.sort_desc_button = UIHelper.create_button("Sort by Date (Descending)", lambda: self.sort_table("desc"))
+        sort_buttons_layout.addWidget(self.sort_desc_button)
+        
+        self.print_layout.addLayout(sort_buttons_layout)
+        
+        UIHelper.add_section_spacing(self.print_layout)
+        
+        # Section: Actions
+        self.print_layout.addWidget(UIHelper.create_section_label("Actions"))
+        
+        # Print and Show All Bills buttons
+        buttons_layout = QHBoxLayout()
+        
+        self.print_button = UIHelper.create_button("Print Bills", self.print_bills)
+        buttons_layout.addWidget(self.print_button)
+        
+        self.show_all_button = UIHelper.create_button("Show All Bills", self.load_bills)
+        buttons_layout.addWidget(self.show_all_button)
+        
+        self.print_layout.addLayout(buttons_layout)
+        
+        UIHelper.add_section_spacing(self.print_layout)
+        
+        # Section: Database Selection
+        self.print_layout.addWidget(UIHelper.create_section_label("Select Year"))
+        
+        # Database selection dropdown
+        self.year_selector = QComboBox()
+        self.year_selector.addItem("Present Database")
+        self.year_selector.currentIndexChanged.connect(self.load_bills)
+        self.print_layout.addWidget(self.year_selector)
+        
+        UIHelper.add_section_spacing(self.print_layout)
+        
+        # Section: Bills Table
+        self.print_layout.addWidget(UIHelper.create_section_label("Bills"))
+        
+        # Table to display bills
+        self.bill_table = UIHelper.create_table(3, ["Date", "Name", "Price"])
+        self.print_layout.addWidget(self.bill_table)
+
+    def init_bill_page(self):
+        """Initialize the Bill Entry tab with form and category selection."""
+        self.bill_page = QWidget()
+        self.bill_layout = QVBoxLayout()
+        self.bill_page.setLayout(self.bill_layout)
+
+        # Section: Date Selection
+        self.bill_layout.addWidget(UIHelper.create_section_label("Select Date"))
+        
+        # Calendar
+        self.calendar = QCalendarWidget()
+        self.calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
+        self.bill_layout.addWidget(self.calendar)
+
+        # Manual date input
+        self.date_input = UIHelper.create_date_input()
+        self.bill_layout.addWidget(self.date_input)
+        
+        UIHelper.add_section_spacing(self.bill_layout)
+        
+        # Section: Bill Details
+        self.bill_layout.addWidget(UIHelper.create_section_label("Bill Details"))
+
+        # Name input
+        self.name_input = UIHelper.create_input_field("Enter bill name")
+        self.name_input.textChanged.connect(self.show_autocomplete_suggestions)
+        self.bill_layout.addWidget(self.name_input)
+
+        # Autocomplete suggestions list
+        self.suggestions_list = QListWidget()
+        self.suggestions_list.setFixedHeight(150)
+        self.suggestions_list.itemClicked.connect(self.select_suggestion)
+        self.bill_layout.addWidget(self.suggestions_list)
+
+        # Amount input
+        self.price_input = UIHelper.create_input_field("Enter price")
+        self.bill_layout.addWidget(self.price_input)
+        
+        UIHelper.add_section_spacing(self.bill_layout)
+        
+        # Section: Categories
+        self.bill_layout.addWidget(UIHelper.create_section_label("Select Categories"))
+        
+        # Category buttons
+        self.category_buttons = {}
+        self.categories = self.predefined_order
+        self.category_layout = QGridLayout()
+        
+        for i, category in enumerate(self.categories):
+            button = UIHelper.create_button(category, partial(self.add_category, category))
+            self.category_layout.addWidget(button, i // 5, i % 5)
+            self.category_buttons[category] = button
+            
+        self.bill_layout.addLayout(self.category_layout)
+        
+        UIHelper.add_section_spacing(self.bill_layout)
+        
+        # Section: Add Photo
+        self.bill_layout.addWidget(UIHelper.create_section_label("Bill Photo"))
+
+        # Image buttons layout
+        image_buttons_layout = QHBoxLayout()
+        
+        # Image selection button
+        self.image_button = UIHelper.create_button("Add Photo", self.select_photo)
+        image_buttons_layout.addWidget(self.image_button)
+        
+        # OCR scan button (if OCR is available)
+        self.scan_button = UIHelper.create_button("Scan Receipt", self.scan_receipt)
+        self.scan_button.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.scan_button.customContextMenuRequested.connect(self.show_scan_context_menu)
+        image_buttons_layout.addWidget(self.scan_button)
+        
+        # Check OCR availability and update the scan button state
+        self.update_scan_button_state()
+        
+        self.bill_layout.addLayout(image_buttons_layout)
+
+        # Image preview
+        self.image_preview = QLabel()
+        self.image_preview.setFixedSize(200, 200)
+        self.image_preview.setScaledContents(True)
+        self.bill_layout.addWidget(self.image_preview)
+        
+        UIHelper.add_section_spacing(self.bill_layout)
+        
+        # Section: Save
+        self.save_button = UIHelper.create_button("Save Bill", self.save_bill)
+        self.bill_layout.addWidget(self.save_button)
+        
+        UIHelper.add_section_spacing(self.bill_layout)
+        
+        # Section: Recent Bills
+        self.bill_layout.addWidget(UIHelper.create_section_label("Recent Bills"))
+        
+        # Table to display bills (only present database)
+        self.present_bill_table = UIHelper.create_table(3, ["Date", "Name", "Price"])
+        self.bill_layout.addWidget(self.present_bill_table)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
