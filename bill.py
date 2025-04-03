@@ -3,20 +3,687 @@ import json
 from datetime import datetime
 import sys
 import os
+import re
+import tempfile
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QVBoxLayout, QGridLayout, QWidget, QPushButton, QTableWidget, QTableWidgetItem, 
     QCalendarWidget, QLineEdit, QLabel, QMessageBox, QComboBox, QHBoxLayout, QTabWidget, QListWidget, QFileDialog,
-    QScrollArea
+    QScrollArea, QDialog, QProgressBar, QCheckBox, QMenu
 )
 from PyQt5.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog, QPageSetupDialog
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtGui import QPixmap, QImage
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
 import sqlite3
 import shutil
 
-category_order = ["Mortgage", "Food", "Gas", "Mechanic", "Work Clothes", "Materials", "Miscellaneous", "Doctor", "Equipment & Rent", "Cash"]
+# Try to import OCR libraries
+try:
+    import pytesseract
+    from PIL import Image
+    import cv2
+    HAS_OCR = True
+except ImportError:
+    HAS_OCR = False
+
+# Define constants
+DATE_FORMAT = "%m/%d/%Y"
+DATE_FORMATS = ["%m/%d/%y", "%m/%d/%Y"]
+DEFAULT_CATEGORIES = ["Mortgage", "Food", "Gas", "Mechanic", "Work Clothes", "Materials", "Miscellaneous", "Doctor", "Equipment & Rent", "Cash"]
+
+class DateHelper:
+    """Helper class for handling date operations."""
+    
+    @staticmethod
+    def parse_date(date_text):
+        """Parse a date from text using multiple formats.
+        
+        Args:
+            date_text: The date text to parse.
+            
+        Returns:
+            str: The formatted date in MM/dd/YYYY format, or None if parsing fails.
+        """
+        if not date_text:
+            return None
+            
+        for date_format in DATE_FORMATS:
+            try:
+                return datetime.strptime(date_text, date_format).strftime(DATE_FORMAT)
+            except ValueError:
+                continue
+        return None
+    
+    @staticmethod
+    def parse_date_range(start_date_text, end_date_text):
+        """Parse a date range from text.
+        
+        Args:
+            start_date_text: The start date text.
+            end_date_text: The end date text.
+            
+        Returns:
+            tuple: (start_date, end_date) in MM/dd/YYYY format, or (None, None) if parsing fails.
+        """
+        start_date = DateHelper.parse_date(start_date_text)
+        end_date = DateHelper.parse_date(end_date_text)
+        
+        if start_date and end_date:
+            return start_date, end_date
+        return None, None
+
+class TranslationManager:
+    """Manages translations for the application."""
+    
+    # Define translations for all text in the application
+    TRANSLATIONS = {
+        # Tab names
+        "Bill Entry": {"es": "Entrada de Facturas"},
+        "Print Page": {"es": "Página de Impresión"},
+        "Delete Page": {"es": "Página de Eliminación"},
+        "Data": {"es": "Datos"},
+        "Settings": {"es": "Configuración"},
+        "Photos": {"es": "Fotos"},
+        
+        # Bill Entry tab
+        "Select Date": {"es": "Seleccionar Fecha"},
+        "Bill Details": {"es": "Detalles de la Factura"},
+        "Enter bill name": {"es": "Ingrese nombre de factura"},
+        "Enter price": {"es": "Ingrese precio"},
+        "Select Categories": {"es": "Seleccionar Categorías"},
+        "Bill Photo": {"es": "Foto de Factura"},
+        "Add Photo": {"es": "Agregar Foto"},
+        "Scan Receipt": {"es": "Escanear Recibo"},
+        "Save Bill": {"es": "Guardar Factura"},
+        "Recent Bills": {"es": "Facturas Recientes"},
+        
+        # Print Page tab
+        "Filter Bills by Date Range": {"es": "Filtrar Facturas por Rango de Fechas"},
+        "Filter by Date Range": {"es": "Filtrar por Rango de Fechas"},
+        "Sort Options": {"es": "Opciones de Ordenamiento"},
+        "Sort by Date (Ascending)": {"es": "Ordenar por Fecha (Ascendente)"},
+        "Sort by Date (Descending)": {"es": "Ordenar por Fecha (Descendente)"},
+        "Actions": {"es": "Acciones"},
+        "Print Bills": {"es": "Imprimir Facturas"},
+        "Show All Bills": {"es": "Mostrar Todas las Facturas"},
+        "Select Year": {"es": "Seleccionar Año"},
+        "Bills": {"es": "Facturas"},
+        
+        # Delete Page tab
+        "Search Bills by Date": {"es": "Buscar Facturas por Fecha"},
+        "Search": {"es": "Buscar"},
+        "Sort Ascending": {"es": "Ordenar Ascendente"},
+        "Sort Descending": {"es": "Ordenar Descendente"},
+        "Delete Selected": {"es": "Eliminar Seleccionado"},
+        
+        # Data tab
+        "Monthly Expenditure": {"es": "Gastos Mensuales"},
+        
+        # Settings tab
+        "Add New Category": {"es": "Agregar Nueva Categoría"},
+        "Enter new category": {"es": "Ingrese nueva categoría"},
+        "Add Category": {"es": "Agregar Categoría"},
+        "Existing Categories": {"es": "Categorías Existentes"},
+        "Delete": {"es": "Eliminar"},
+        
+        # Photos tab
+        "Filter Photos by Date": {"es": "Filtrar Fotos por Fecha"},
+        "Filter Photos": {"es": "Filtrar Fotos"},
+        "Photo Gallery": {"es": "Galería de Fotos"},
+        
+        # OCR-related
+        "OCR Results": {"es": "Resultados de OCR"},
+        "Vendor/Name:": {"es": "Vendedor/Nombre:"},
+        "Date:": {"es": "Fecha:"},
+        "Amount:": {"es": "Monto:"},
+        "Apply these values": {"es": "Aplicar estos valores"},
+        "Edit before applying": {"es": "Editar antes de aplicar"},
+        "Cancel": {"es": "Cancelar"},
+        "Processing Receipt": {"es": "Procesando Recibo"},
+        "Extracting information from receipt...": {"es": "Extrayendo información del recibo..."},
+        "OCR Not Available": {"es": "OCR No Disponible"},
+        "OCR functionality requires pytesseract, Pillow, and OpenCV. Please install these packages to use receipt scanning.": 
+            {"es": "La funcionalidad de OCR requiere pytesseract, Pillow y OpenCV. Por favor, instale estos paquetes para usar el escaneo de recibos."},
+        "Configure Tesseract Path": {"es": "Configurar Ruta de Tesseract"},
+        "Set Custom Tesseract Path": {"es": "Establecer Ruta Personalizada de Tesseract"},
+        "Tesseract Path:": {"es": "Ruta de Tesseract:"},
+        "Select Tesseract Executable": {"es": "Seleccionar Ejecutable de Tesseract"},
+        "Path validated successfully": {"es": "Ruta validada con éxito"},
+        "Invalid Tesseract path": {"es": "Ruta de Tesseract inválida"},
+        "Tesseract Test": {"es": "Prueba de Tesseract"},
+        "Test OCR": {"es": "Probar OCR"},
+        "OCR Testing Successful": {"es": "Prueba de OCR Exitosa"},
+        "OCR Test Failed": {"es": "Prueba de OCR Fallida"},
+        "Save": {"es": "Guardar"},
+        "Tesseract Not Found": {"es": "Tesseract No Encontrado"},
+        "OCR Error": {"es": "Error de OCR"},
+        "Tesseract OCR not found. Right-click to configure Tesseract path.": {"es": "Tesseract OCR no encontrado. Haga clic derecho para configurar la ruta de Tesseract."},
+        "Tesseract OCR is not installed or not in your PATH. Would you like to configure the Tesseract path manually?": {"es": "Tesseract OCR no está instalado o no está en su PATH. ¿Desea configurar la ruta de Tesseract manualmente?"},
+        "An error occurred during OCR processing:": {"es": "Ocurrió un error durante el procesamiento OCR:"},
+        "Please enter a Tesseract path": {"es": "Por favor ingrese una ruta de Tesseract"},
+        "Failed to set Tesseract path": {"es": "Error al establecer la ruta de Tesseract"},
+        "If Tesseract OCR is installed but not detected automatically, you can set the path to the executable manually below.": {"es": "Si Tesseract OCR está instalado pero no se detecta automáticamente, puede establecer la ruta al ejecutable manualmente a continuación."},
+        
+        # Table headers
+        "Date": {"es": "Fecha"},
+        "Name": {"es": "Nombre"},
+        "Price": {"es": "Precio"},
+        "Month": {"es": "Mes"},
+        "Cash": {"es": "Efectivo"},
+        "Not Cash": {"es": "No Efectivo"},
+        "Total": {"es": "Total"},
+        "Year Total": {"es": "Total Anual"},
+        
+        # Messages
+        "Input Error": {"es": "Error de Entrada"},
+        "Please enter date, name, and price.": {"es": "Por favor ingrese fecha, nombre y precio."},
+        "Invalid date format. Please use MM/dd/yyyy.": {"es": "Formato de fecha inválido. Use MM/dd/yyyy."},
+        "Failed to save bill. Please try again.": {"es": "Error al guardar factura. Intente nuevamente."},
+        "Selection Error": {"es": "Error de Selección"},
+        "No row selected.": {"es": "Ninguna fila seleccionada."},
+        "Failed to delete bill. Please try again.": {"es": "Error al eliminar factura. Intente nuevamente."},
+        
+        # Categories (default)
+        "Mortgage": {"es": "Hipoteca"},
+        "Food": {"es": "Alimentos"},
+        "Gas": {"es": "Gasolina"},
+        "Mechanic": {"es": "Mecánico"},
+        "Work Clothes": {"es": "Ropa de Trabajo"},
+        "Materials": {"es": "Materiales"},
+        "Miscellaneous": {"es": "Varios"},
+        "Doctor": {"es": "Doctor"},
+        "Equipment & Rent": {"es": "Equipo y Alquiler"},
+        "Cash": {"es": "Efectivo"},
+        
+        # Date placeholders
+        "MM/dd/yyyy": {"es": "MM/dd/aaaa"},
+        
+        # Other
+        "Present Database": {"es": "Base de Datos Actual"},
+        "Bill Tracker": {"es": "Seguimiento de Facturas"},
+        "Language": {"es": "Idioma"},
+        "English": {"es": "Inglés"},
+        "Spanish": {"es": "Español"},
+        "Error": {"es": "Error"}
+    }
+    
+    def __init__(self):
+        """Initialize the translation manager with English as default."""
+        self.current_language = "en"
+        
+    def set_language(self, language_code):
+        """Set the current language.
+        
+        Args:
+            language_code: Two-letter language code (en, es)
+        """
+        if language_code in ["en", "es"]:
+            self.current_language = language_code
+            return True
+        return False
+        
+    def translate(self, text):
+        """Translate text to the current language.
+        
+        Args:
+            text: The text to translate
+            
+        Returns:
+            str: Translated text if available, otherwise the original text
+        """
+        if self.current_language == "en":
+            return text
+            
+        if text in self.TRANSLATIONS and self.current_language in self.TRANSLATIONS[text]:
+            return self.TRANSLATIONS[text][self.current_language]
+        return text
+
+class UIHelper:
+    """Helper class for creating consistent UI components."""
+    
+    # Static translator instance
+    translator = TranslationManager()
+    
+    @staticmethod
+    def translate(text):
+        """Translate text using the current language.
+        
+        Args:
+            text: Text to translate
+            
+        Returns:
+            str: Translated text
+        """
+        return UIHelper.translator.translate(text)
+    
+    @staticmethod
+    def create_button(text, callback=None, height=40):
+        """Create a styled button with optional callback.
+        
+        Args:
+            text: Button text
+            callback: Function to call when button is clicked
+            height: Button height in pixels
+            
+        Returns:
+            QPushButton: The created button
+        """
+        button = QPushButton(UIHelper.translate(text))
+        button.setFixedHeight(height)
+        button.setProperty("original_text", text)  # Store original text for translation updates
+        if callback:
+            button.clicked.connect(callback)
+        return button
+    
+    @staticmethod
+    def create_input_field(placeholder, validator=None):
+        """Create a styled input field with optional validator.
+        
+        Args:
+            placeholder: Placeholder text
+            validator: Optional QValidator for input validation
+            
+        Returns:
+            QLineEdit: The created input field
+        """
+        input_field = QLineEdit()
+        input_field.setPlaceholderText(UIHelper.translate(placeholder))
+        input_field.setProperty("original_placeholder", placeholder)  # Store original text for translation updates
+        if validator:
+            input_field.setValidator(validator)
+        return input_field
+    
+    @staticmethod
+    def create_date_input():
+        """Create a date input field with consistent formatting.
+        
+        Returns:
+            QLineEdit: The created date input field
+        """
+        date_input = QLineEdit()
+        date_input.setPlaceholderText(UIHelper.translate("MM/dd/yyyy"))
+        date_input.setProperty("original_placeholder", "MM/dd/yyyy")  # Store original text for translation updates
+        return date_input
+    
+    @staticmethod
+    def create_section_label(text):
+        """Create a section label with consistent styling.
+        
+        Args:
+            text: Label text
+            
+        Returns:
+            QLabel: The created label
+        """
+        label = QLabel(UIHelper.translate(text))
+        label.setStyleSheet("font-weight: bold; font-size: 16px; margin-top: 10px;")
+        label.setProperty("original_text", text)  # Store original text for translation updates
+        return label
+    
+    @staticmethod
+    def create_table(columns, headers=None):
+        """Create a styled table with specified columns.
+        
+        Args:
+            columns: Number of columns
+            headers: Optional list of column headers
+            
+        Returns:
+            QTableWidget: The created table
+        """
+        table = QTableWidget(0, columns)
+        if headers:
+            translated_headers = [UIHelper.translate(header) for header in headers]
+            table.setHorizontalHeaderLabels(translated_headers)
+            table.setProperty("original_headers", headers)  # Store original headers for translation updates
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setAlternatingRowColors(True)
+        return table
+    
+    @staticmethod
+    def add_section_spacing(layout):
+        """Add consistent spacing between sections.
+        
+        Args:
+            layout: The layout to add spacing to
+        """
+        spacer = QWidget()
+        spacer.setFixedHeight(20)
+        layout.addWidget(spacer)
+
+class SettingsManager:
+    """Handles settings and categories for the bill tracker application."""
+    
+    def __init__(self):
+        """Initialize the settings manager."""
+        pass
+    
+    @staticmethod
+    def load_categories():
+        """Load categories from the categories.json file.
+        
+        Returns:
+            list: The list of categories.
+        """
+        try:
+            with open("categories.json", "r") as file:
+                return json.load(file)
+        except FileNotFoundError:
+            return DEFAULT_CATEGORIES.copy()
+    
+    @staticmethod
+    def save_categories(categories):
+        """Save categories to the categories.json file.
+        
+        Args:
+            categories: The list of categories to save.
+        """
+        with open("categories.json", "w") as file:
+            json.dump(categories, file)
+
+class OCRHelper:
+    """Helper class for OCR (Optical Character Recognition) processing of bill images."""
+    
+    # Default Tesseract path locations to check
+    TESSERACT_PATHS = [
+        r'C:\Program Files\Tesseract-OCR\tesseract.exe',
+        r'C:\Program Files (x86)\Tesseract-OCR\tesseract.exe',
+        '/usr/bin/tesseract',
+        '/usr/local/bin/tesseract'
+    ]
+    
+    # Custom path set by user (if any)
+    custom_tesseract_path = None
+    
+    @staticmethod
+    def set_tesseract_path(path):
+        """Set a custom path for the Tesseract executable.
+        
+        Args:
+            path: Path to the Tesseract executable.
+            
+        Returns:
+            bool: True if the path is valid, False otherwise.
+        """
+        if os.path.exists(path) and os.path.isfile(path):
+            OCRHelper.custom_tesseract_path = path
+            pytesseract.pytesseract.tesseract_cmd = path
+            return True
+        return False
+    
+    @staticmethod
+    def configure_tesseract():
+        """Configure Tesseract with the best available path.
+        
+        Returns:
+            bool: True if configuration successful, False otherwise.
+        """
+        # First check if custom path is set
+        if OCRHelper.custom_tesseract_path:
+            pytesseract.pytesseract.tesseract_cmd = OCRHelper.custom_tesseract_path
+            return True
+            
+        # Try to automatically find Tesseract
+        # First, check common installation paths
+        for path in OCRHelper.TESSERACT_PATHS:
+            if os.path.exists(path) and os.path.isfile(path):
+                pytesseract.pytesseract.tesseract_cmd = path
+                return True
+        
+        # If not found in common paths, rely on system PATH
+        return True  # Return True and let it fail naturally if not found
+    
+    @staticmethod
+    def is_available():
+        """Check if OCR functionality is available.
+        
+        Returns:
+            bool: True if OCR is available, False otherwise.
+        """
+        if not HAS_OCR:
+            return False
+            
+        try:
+            # Try to configure Tesseract
+            OCRHelper.configure_tesseract()
+            
+            # Create a small test image
+            import numpy as np
+            test_img = np.zeros((50, 100), dtype=np.uint8)
+            test_img.fill(255)
+            
+            # Save test image to a temporary file
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp:
+                temp_path = temp.name
+                cv2.imwrite(temp_path, test_img)
+            
+            # Try to run OCR on the test image
+            pytesseract.image_to_string(Image.open(temp_path))
+            
+            # Remove the test file
+            os.unlink(temp_path)
+            
+            return True
+        except Exception as e:
+            print(f"OCR availability check failed: {e}")
+            return False
+    
+    @staticmethod
+    def preprocess_image(image_path):
+        """Preprocess the image to improve OCR accuracy.
+        
+        Args:
+            image_path: Path to the image file.
+            
+        Returns:
+            numpy.ndarray: Preprocessed image or None if preprocessing failed.
+        """
+        try:
+            # Read the image
+            img = cv2.imread(image_path)
+            
+            # Convert to grayscale
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            
+            # Apply threshold to get black and white image
+            _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            
+            # Noise removal
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+            opening = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel, iterations=1)
+            
+            return opening
+        except Exception as e:
+            print(f"Error preprocessing image: {e}")
+            return None
+    
+    @staticmethod
+    def extract_text(image_path):
+        """Extract text from an image using OCR.
+        
+        Args:
+            image_path: Path to the image file.
+            
+        Returns:
+            str: Extracted text or empty string if extraction failed.
+        """
+        if not HAS_OCR:
+            return ""
+            
+        try:
+            # Configure Tesseract
+            OCRHelper.configure_tesseract()
+            
+            # Preprocess the image
+            processed_img = OCRHelper.preprocess_image(image_path)
+            
+            if processed_img is None:
+                # If preprocessing failed, use the original image
+                text = pytesseract.image_to_string(Image.open(image_path))
+            else:
+                # Save the processed image to a temporary file
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp:
+                    temp_path = temp.name
+                    cv2.imwrite(temp_path, processed_img)
+                
+                # Extract text from the processed image
+                text = pytesseract.image_to_string(Image.open(temp_path))
+                
+                # Remove the temporary file
+                os.unlink(temp_path)
+                
+            return text
+        except Exception as e:
+            error_msg = str(e)
+            print(f"Error extracting text: {error_msg}")
+            
+            if "tesseract is not installed" in error_msg or "not in your PATH" in error_msg:
+                raise RuntimeError("tesseract is not installed or it's not in your PATH. See OCR_INSTALL.md file for more information.")
+            
+            return ""
+    
+    @staticmethod
+    def parse_receipt(text):
+        """Parse the extracted text to find bill information.
+        
+        Args:
+            text: Text extracted from the receipt.
+            
+        Returns:
+            dict: Dictionary containing extracted information (date, vendor, amount).
+        """
+        result = {
+            "date": None,
+            "vendor": None,
+            "amount": None
+        }
+        
+        if not text:
+            return result
+        
+        lines = text.strip().split('\n')
+
+        for i, line in enumerate(lines[:5]):  # Check first 5 lines
+            line = line.strip()
+            if line and len(line) > 2:
+                # Check if it's not just a date or number
+                if not re.match(r'^[\d\W]+$', line):
+                    result["vendor"] = line
+                    break
+
+        # Try to extract date
+        date_patterns = [
+            # Common US date formats
+            r'\b(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})\b',  # MM/DD/YYYY or DD/MM/YYYY
+            
+            # Look for explicit date indicators
+            r'date\s*:?\s*(\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4})',  # "date: MM/DD/YYYY"
+            r'date\s*:?\s*(\d{2,4}[/\-\.]\d{1,2}[/\-\.]\d{1,2})',  # "date: YYYY/MM/DD"
+            
+            # Look for explicit date word
+            r'\b(\d{2})[\.-/](\d{2})[\.-/](\d{2,4})\b'  # DD.MM.YYYY or MM.DD.YYYY
+        ]
+
+        for line in lines:
+            line_lower = line.lower()
+            # If line contains the word "date", prioritize it
+            if 'date' in line_lower:
+                for pattern in date_patterns:
+                    date_matches = re.findall(pattern, line, re.IGNORECASE)
+                    if date_matches:
+                        date_text = date_matches[0]
+                        if isinstance(date_text, tuple):
+                            date_text = f"{date_text[0]}/{date_text[1]}/{date_text[2]}"
+                        result["date"] = date_text
+                        break
+                if result["date"]:
+                    break
+        
+        if not result["date"]:
+            for line in lines:
+                for pattern in date_patterns:
+                    date_matches = re.findall(pattern, line)
+                    if date_matches:
+                        date_text = date_matches[0]
+                        if isinstance(date_text, tuple):
+                            date_text = f"{date_text[0]}/{date_text[1]}/{date_text[2]}"
+                        result["date"] = date_text
+                        break
+                if result["date"]:
+                    break
+        
+        # Try to extract amount (looking for currency symbols, 'total', etc.)
+        total_patterns = [
+            # Look for explicit total indicators
+            r'(?:total|amount|sale total|grand total|balance)\s*:?\s*\$?\s*(\d+\.\d{2})',  # "total: $XX.XX" 
+            r'(?:total|amount|sale total|grand total|balance)\s*:?\s*\$?\s*(\d+,\d{3}\.\d{2})',  # "total: $X,XXX.XX"
+            
+            # Look for $ symbol with numbers
+            r'\$\s*(\d+\.\d{2})',  # $XX.XX
+            r'\$\s*(\d+,\d{3}\.\d{2})',  # $X,XXX.XX
+            
+            # Fallback - look for decimal numbers near total-related words
+            r'(?:total|amount|sale|balance).*?(\d+\.\d{2})',  # "total ... XX.XX"
+            r'(\d+\.\d{2}).*?(?:total|amount|sale|balance)',  # "XX.XX ... total"
+        ]
+        
+        for line in lines:
+            line_lower = line.lower()
+            if any(word in line_lower for word in ['total', 'amount', 'balance', 'sale']):
+                for pattern in total_patterns:
+                    amount_matches = re.findall(pattern, line_lower)
+                    if amount_matches:
+                        # Take the last match if multiple found (often the total is after subtotal)
+                        result["total"] = amount_matches[-1].replace(',', '')
+                        break
+                
+                # If we found an amount in a line with "total", prioritize it
+                if result["total"]:
+                    break
+        
+        if not result["total"]:
+            all_amounts = []
+            for line in lines:
+                amounts = re.findall(r'\$?\s*(\d+\.\d{2})', line)
+                all_amounts.extend(amounts)
+            
+            # If we found multiple amounts, take the largest one as likely the total
+            if all_amounts:
+                all_amounts = [float(amt.replace(',', '')) for amt in all_amounts]
+                result["total"] = str(max(all_amounts))
+        
+        return result
+
+class OCRWorker(QThread):
+    """Worker thread for OCR processing to keep the UI responsive."""
+    
+    finished = pyqtSignal(dict)
+    progress = pyqtSignal(int)
+    
+    def __init__(self, image_path):
+        super().__init__()
+        self.image_path = image_path
+        
+    def run(self):
+        """Run the OCR processing in a separate thread."""
+        # Update progress
+        self.progress.emit(10)
+        
+        # Extract text from the image
+        text = OCRHelper.extract_text(self.image_path)
+        
+        # Update progress
+        self.progress.emit(70)
+        
+        # Parse the extracted text
+        result = OCRHelper.parse_receipt(text)
+        
+        # Update progress
+        self.progress.emit(100)
+        
+        # Emit the result
+        self.finished.emit(result)
 
 class TrieNode:
     def __init__(self):
@@ -64,18 +731,535 @@ class Trie:
         all_suggestions = list(dict.fromkeys(words + similar_words))
         return all_suggestions[:limit]
 
+class DatabaseManager:
+    """Handles all database operations for the bill tracker application."""
+    
+    def __init__(self):
+        """Initialize the database manager with an in-memory database."""
+        self.conn = sqlite3.connect(':memory:')  # In-memory database for current session
+        self.create_tables()
+    
+    def create_tables(self):
+        """Create the necessary tables if they don't exist."""
+        query = """
+        CREATE TABLE IF NOT EXISTS bills (
+            id INTEGER PRIMARY KEY,
+            date TEXT,
+            name TEXT,
+            price TEXT,
+            image TEXT
+        )
+        """
+        self.conn.execute(query)
+        self.conn.commit()
+    
+    def get_db_connection(self, year=None):
+        """Get a database connection based on the year.
+        
+        Args:
+            year: The year to get the database for. If None, returns the in-memory database.
+            
+        Returns:
+            sqlite3.Connection: The database connection.
+        """
+        if year is None or year == "Present Database":
+            return self.conn
+        else:
+            db_name = f"bills_{year}.db"
+            conn = sqlite3.connect(db_name)
+            # Ensure the table exists in the year-specific database
+            query = """
+            CREATE TABLE IF NOT EXISTS bills (
+                id INTEGER PRIMARY KEY,
+                date TEXT,
+                name TEXT,
+                price TEXT,
+                image TEXT
+            )
+            """
+            conn.execute(query)
+            conn.commit()
+            return conn
+    
+    def save_bill(self, date, name, price, image_path=None):
+        """Save a bill to both the year-specific database and in-memory database.
+        
+        Args:
+            date: The date of the bill.
+            name: The name of the bill.
+            price: The price of the bill.
+            image_path: The path to the bill's image, if any.
+            
+        Returns:
+            bool: True if successful, False otherwise.
+        """
+        try:
+            # Format the price as currency
+            formatted_price = f"${float(price):.2f}"
+            
+            # Determine the year for the database
+            year = datetime.strptime(date, DATE_FORMAT).year
+            db_name = f"bills_{year}.db"
+            
+            # Save to year-specific database
+            conn = sqlite3.connect(db_name)
+            self.create_tables_in_db(conn)
+            
+            # Save to the year-specific database
+            query = "INSERT INTO bills (date, name, price) VALUES (?, ?, ?)"
+            conn.execute(query, (date, name, formatted_price))
+            conn.commit()
+            conn.close()
+            
+            # Save to the in-memory database
+            self.conn.execute(query, (date, name, formatted_price))
+            self.conn.commit()
+            
+            # Handle image if provided
+            image_filename = None
+            if image_path:
+                image_folder = "bill_images"
+                os.makedirs(image_folder, exist_ok=True)
+                image_filename = f"{date.replace('/', '-')}_{name}.jpg"
+                dest_path = os.path.join(image_folder, image_filename)
+                shutil.copy(image_path, dest_path)
+                
+                # Update the database with the image filename
+                update_query = "UPDATE bills SET image = ? WHERE date = ? AND name = ? AND price = ?"
+                self.conn.execute(update_query, (image_filename, date, name, formatted_price))
+                self.conn.commit()
+                
+                # Also update the year-specific database
+                conn = sqlite3.connect(db_name)
+                conn.execute(update_query, (image_filename, date, name, formatted_price))
+                conn.commit()
+                conn.close()
+                
+            return True
+        except Exception as e:
+            print(f"Error saving bill: {e}")
+            return False
+    
+    def create_tables_in_db(self, conn):
+        """Create necessary tables in the provided database connection."""
+        query = """
+        CREATE TABLE IF NOT EXISTS bills (
+            id INTEGER PRIMARY KEY,
+            date TEXT,
+            name TEXT,
+            price TEXT,
+            image TEXT
+        )
+        """
+        conn.execute(query)
+        conn.commit()
+    
+    def get_bills(self, year=None, start_date=None, end_date=None):
+        """Get bills from the database with optional filtering.
+        
+        Args:
+            year: The year to get bills from. If None, uses the in-memory database.
+            start_date: Optional start date for filtering.
+            end_date: Optional end date for filtering.
+            
+        Returns:
+            list: List of bill tuples (date, name, price).
+        """
+        conn = self.get_db_connection(year)
+        
+        if start_date and end_date:
+            query = "SELECT date, name, price FROM bills WHERE date BETWEEN ? AND ?"
+            cursor = conn.execute(query, (start_date, end_date))
+        else:
+            query = "SELECT date, name, price FROM bills"
+            cursor = conn.execute(query)
+        
+        bills = cursor.fetchall()
+        
+        # Close the connection if it's not the in-memory database
+        if year is not None and year != "Present Database":
+            conn.close()
+            
+        return bills
+    
+    def get_bill_images(self, start_date=None, end_date=None):
+        """Get bill images from the database with optional date filtering.
+        
+        Args:
+            start_date: Optional start date for filtering.
+            end_date: Optional end date for filtering.
+            
+        Returns:
+            list: List of tuples containing (date, image_filename).
+        """
+        if start_date and end_date:
+            query = "SELECT date, image FROM bills WHERE image IS NOT NULL AND date BETWEEN ? AND ?"
+            cursor = self.conn.execute(query, (start_date, end_date))
+        else:
+            query = "SELECT date, image FROM bills WHERE image IS NOT NULL"
+            cursor = self.conn.execute(query)
+            
+        return cursor.fetchall()
+    
+    def delete_bill(self, year, date, name, price):
+        """Delete a bill from the database.
+        
+        Args:
+            year: The year of the database to delete from.
+            date: The date of the bill.
+            name: The name of the bill.
+            price: The price of the bill.
+            
+        Returns:
+            bool: True if successful, False otherwise.
+        """
+        try:
+            conn = sqlite3.connect(f"bills_{year}.db")
+            conn.execute("DELETE FROM bills WHERE date = ? AND name = ? AND price = ?", (date, name, price))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            print(f"Error deleting bill: {e}")
+            return False
+    
+    def get_existing_databases(self):
+        """Get a list of existing year-specific databases.
+        
+        Returns:
+            list: List of years for which databases exist.
+        """
+        years = []
+        for file in os.listdir('.'):
+            if file.startswith('bills_') and file.endswith('.db'):
+                year = file[6:10]
+                if year.isdigit():
+                    years.append(year)
+        return years
+    
+    def get_monthly_totals(self, year):
+        """Calculate monthly totals for a specific year.
+        
+        Args:
+            year: The year to calculate totals for.
+            
+        Returns:
+            dict: Dictionary of monthly totals.
+        """
+        conn = self.get_db_connection(year)
+        
+        query = "SELECT date, price, name FROM bills"
+        cursor = conn.execute(query)
+        
+        # Initialize monthly totals
+        monthly_totals = {month: {"cash": 0, "not_cash": 0, "total": 0} for month in range(1, 13)}
+        yearly_totals = {"cash": 0, "not_cash": 0, "total": 0}
+        
+        for row in cursor:
+            date = row[0]
+            price = float(row[1].replace("$", ""))
+            name = row[2]
+            
+            # Extract the month from the date
+            month = datetime.strptime(date, DATE_FORMAT).month
+            
+            # Determine if it's a cash transaction
+            if "Cash" in name:
+                monthly_totals[month]["cash"] += price
+                yearly_totals["cash"] += price
+            else:
+                monthly_totals[month]["not_cash"] += price
+                yearly_totals["not_cash"] += price
+                
+            # Update monthly and yearly totals
+            monthly_totals[month]["total"] += price
+            yearly_totals["total"] += price
+            
+        # Close the connection if it's not the in-memory database
+        if year is not None and year != "Present Database":
+            conn.close()
+            
+        return monthly_totals, yearly_totals
+
+class OCRResultsDialog(QDialog):
+    """Dialog for confirming OCR results."""
+    
+    def __init__(self, parent=None, ocr_results=None):
+        """Initialize the dialog with OCR results.
+        
+        Args:
+            parent: Parent widget
+            ocr_results: Dictionary of OCR results (vendor, date, amount)
+        """
+        super().__init__(parent)
+        
+        self.result = {
+            "accepted": False,
+            "vendor": ocr_results.get("vendor", ""),
+            "date": ocr_results.get("date", ""),
+            "amount": ocr_results.get("amount", "")
+        }
+        
+        self.setWindowTitle(UIHelper.translate("OCR Results"))
+        self.setFixedWidth(400)
+        
+        # Create layout
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+        
+        # Add fields for OCR results
+        # Vendor/Name
+        vendor_layout = QHBoxLayout()
+        vendor_label = QLabel(UIHelper.translate("Vendor/Name:"))
+        vendor_label.setMinimumWidth(100)
+        vendor_layout.addWidget(vendor_label)
+        
+        self.vendor_input = QLineEdit()
+        self.vendor_input.setText(self.result["vendor"] or "")
+        vendor_layout.addWidget(self.vendor_input)
+        layout.addLayout(vendor_layout)
+        
+        # Date
+        date_layout = QHBoxLayout()
+        date_label = QLabel(UIHelper.translate("Date:"))
+        date_label.setMinimumWidth(100)
+        date_layout.addWidget(date_label)
+        
+        self.date_input = QLineEdit()
+        self.date_input.setText(self.result["date"] or "")
+        date_layout.addWidget(self.date_input)
+        layout.addLayout(date_layout)
+        
+        # Amount
+        amount_layout = QHBoxLayout()
+        amount_label = QLabel(UIHelper.translate("Amount:"))
+        amount_label.setMinimumWidth(100)
+        amount_layout.addWidget(amount_label)
+        
+        self.amount_input = QLineEdit()
+        self.amount_input.setText(self.result["amount"] or "")
+        amount_layout.addWidget(self.amount_input)
+        layout.addLayout(amount_layout)
+        
+        # Add buttons
+        buttons_layout = QHBoxLayout()
+        
+        self.apply_button = QPushButton(UIHelper.translate("Apply these values"))
+        self.apply_button.clicked.connect(self.accept_values)
+        buttons_layout.addWidget(self.apply_button)
+        
+        self.edit_button = QPushButton(UIHelper.translate("Edit before applying"))
+        self.edit_button.clicked.connect(self.edit_values)
+        buttons_layout.addWidget(self.edit_button)
+        
+        self.cancel_button = QPushButton(UIHelper.translate("Cancel"))
+        self.cancel_button.clicked.connect(self.reject)
+        buttons_layout.addWidget(self.cancel_button)
+        
+        layout.addLayout(buttons_layout)
+    
+    def accept_values(self):
+        """Accept the OCR values as is."""
+        self.result["accepted"] = True
+        self.result["vendor"] = self.vendor_input.text()
+        self.result["date"] = self.date_input.text()
+        self.result["amount"] = self.amount_input.text()
+        self.accept()
+    
+    def edit_values(self):
+        """Accept the OCR values but indicate they need editing."""
+        self.result["accepted"] = True
+        self.result["edit_needed"] = True
+        self.result["vendor"] = self.vendor_input.text()
+        self.result["date"] = self.date_input.text()
+        self.result["amount"] = self.amount_input.text()
+        self.accept()
+        
+    def get_result(self):
+        """Get the dialog result.
+        
+        Returns:
+            dict: Dictionary of OCR results with acceptance status.
+        """
+        return self.result
+
+class TesseractConfigDialog(QDialog):
+    """Dialog for configuring Tesseract OCR path."""
+    
+    def __init__(self, parent=None):
+        """Initialize the dialog for configuring Tesseract path."""
+        super().__init__(parent)
+        
+        self.setWindowTitle(UIHelper.translate("Configure Tesseract Path"))
+        self.setFixedWidth(500)
+        
+        # Create layout
+        layout = QVBoxLayout()
+        self.setLayout(layout)
+        
+        # Add explanation
+        info_label = QLabel(UIHelper.translate(
+            "If Tesseract OCR is installed but not detected automatically, "
+            "you can set the path to the executable manually below."
+        ))
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+        
+        # Path input
+        path_layout = QHBoxLayout()
+        path_label = QLabel(UIHelper.translate("Tesseract Path:"))
+        path_layout.addWidget(path_label)
+        
+        self.path_input = QLineEdit()
+        if OCRHelper.custom_tesseract_path:
+            self.path_input.setText(OCRHelper.custom_tesseract_path)
+        path_layout.addWidget(self.path_input)
+        
+        self.browse_button = QPushButton("...")
+        self.browse_button.setFixedWidth(40)
+        self.browse_button.clicked.connect(self.browse_for_tesseract)
+        path_layout.addWidget(self.browse_button)
+        
+        layout.addLayout(path_layout)
+        
+        # Test button
+        self.test_button = QPushButton(UIHelper.translate("Test OCR"))
+        self.test_button.clicked.connect(self.test_tesseract)
+        layout.addWidget(self.test_button)
+        
+        # Status label
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("font-weight: bold;")
+        layout.addWidget(self.status_label)
+        
+        # Add buttons
+        buttons_layout = QHBoxLayout()
+        
+        self.save_button = QPushButton(UIHelper.translate("Save"))
+        self.save_button.clicked.connect(self.save_path)
+        buttons_layout.addWidget(self.save_button)
+        
+        self.cancel_button = QPushButton(UIHelper.translate("Cancel"))
+        self.cancel_button.clicked.connect(self.reject)
+        buttons_layout.addWidget(self.cancel_button)
+        
+        layout.addLayout(buttons_layout)
+    
+    def browse_for_tesseract(self):
+        """Open a file dialog to browse for the Tesseract executable."""
+        options = QFileDialog.Options()
+        file_filter = "Executable Files (*.exe);;All Files (*)" if sys.platform == 'win32' else "All Files (*)"
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, 
+            UIHelper.translate("Select Tesseract Executable"), 
+            "", 
+            file_filter, 
+            options=options
+        )
+        
+        if file_path:
+            self.path_input.setText(file_path)
+    
+    def test_tesseract(self):
+        """Test if the specified Tesseract path works."""
+        path = self.path_input.text()
+        
+        if not path:
+            self.status_label.setText(UIHelper.translate("Please enter a Tesseract path"))
+            self.status_label.setStyleSheet("color: red; font-weight: bold;")
+            return
+        
+        if not os.path.exists(path) or not os.path.isfile(path):
+            self.status_label.setText(UIHelper.translate("Invalid Tesseract path"))
+            self.status_label.setStyleSheet("color: red; font-weight: bold;")
+            return
+        
+        # Set the path temporarily
+        original_path = pytesseract.pytesseract.tesseract_cmd
+        pytesseract.pytesseract.tesseract_cmd = path
+        
+        try:
+            # Create a simple test image
+            import numpy as np
+            test_img = np.zeros((50, 200), dtype=np.uint8)
+            test_img.fill(255)
+            
+            # Save to a temporary file
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp:
+                temp_path = temp.name
+                cv2.imwrite(temp_path, test_img)
+            
+            # Try OCR
+            pytesseract.image_to_string(Image.open(temp_path))
+            
+            # Clean up
+            os.unlink(temp_path)
+            
+            # Success
+            self.status_label.setText(UIHelper.translate("OCR Testing Successful"))
+            self.status_label.setStyleSheet("color: green; font-weight: bold;")
+            
+        except Exception as e:
+            # Failure
+            self.status_label.setText(UIHelper.translate("OCR Test Failed") + f": {str(e)}")
+            self.status_label.setStyleSheet("color: red; font-weight: bold;")
+        
+        # Restore original path
+        pytesseract.pytesseract.tesseract_cmd = original_path
+    
+    def save_path(self):
+        """Save the Tesseract path if valid."""
+        path = self.path_input.text()
+        
+        if not path:
+            self.status_label.setText(UIHelper.translate("Please enter a Tesseract path"))
+            self.status_label.setStyleSheet("color: red; font-weight: bold;")
+            return
+        
+        if not os.path.exists(path) or not os.path.isfile(path):
+            self.status_label.setText(UIHelper.translate("Invalid Tesseract path"))
+            self.status_label.setStyleSheet("color: red; font-weight: bold;")
+            return
+        
+        # Set the path
+        if OCRHelper.set_tesseract_path(path):
+            # Save the path to a file
+            try:
+                with open('tesseract_path.txt', 'w') as f:
+                    f.write(path)
+            except Exception as e:
+                print(f"Error saving tesseract path: {e}")
+            
+            # Path set successfully
+            self.accept()
+        else:
+            self.status_label.setText(UIHelper.translate("Failed to set Tesseract path"))
+            self.status_label.setStyleSheet("color: red; font-weight: bold;")
+
+# Main Application Class
 class BillTracker(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('Bill Tracker')
-        self.setGeometry(100, 100, 800, 800)
+        self.setWindowTitle(UIHelper.translate('Bill Tracker'))
+        self.setGeometry(100, 100, 1000, 800)
+        
+        # Initialize managers
+        self.db_manager = DatabaseManager()
+        
+        # Set up OCR functionality
+        self.setup_ocr()
+        
+        # Create top toolbar for language selection
+        self.toolbar = self.addToolBar(UIHelper.translate("Settings"))
+        self.init_toolbar()
 
         # Set up tab widget
         self.tab_widget = QTabWidget()
         self.setCentralWidget(self.tab_widget)
 
-        self.predefined_order = self.load_categories()  # Changed from category_order
+        self.predefined_order = self.load_categories()
         self.selected_categories = []
+        self.selected_image_path = None
         
         # Initialize pages
         self.init_print_page()
@@ -83,24 +1267,22 @@ class BillTracker(QMainWindow):
         self.init_settings_page()
         self.init_data_page()
         self.init_delete_page()
-        
+        self.init_photos_page()
 
         # Add pages to tab widget
-        self.tab_widget.addTab(self.bill_page, "Bill Entry")
-        self.tab_widget.addTab(self.print_page, "Print Page")
-        self.tab_widget.addTab(self.delete_page, "Delete Page")
-        self.tab_widget.addTab(self.data_page, "Data")
-        self.tab_widget.addTab(self.settings_page, "Settings")
+        self.tab_widget.addTab(self.bill_page, UIHelper.translate("Bill Entry"))
+        self.tab_widget.addTab(self.print_page, UIHelper.translate("Print Page"))
+        self.tab_widget.addTab(self.delete_page, UIHelper.translate("Delete Page"))
+        self.tab_widget.addTab(self.data_page, UIHelper.translate("Data"))
+        self.tab_widget.addTab(self.settings_page, UIHelper.translate("Settings"))
+        self.tab_widget.addTab(self.photos_page, UIHelper.translate("Photos"))
         
-
-        # SQLite connection
-        self.conn = sqlite3.connect(':memory:') # use :memory: for in-memory database
-        self.create_table()
+        # Load existing databases and bills
         self.load_existing_databases()
         self.load_bills()
         self.load_present_bills()
 
-        #apply stylesheet
+        # Apply stylesheet
         self.apply_styles()
 
         self.update_settings_page()
@@ -108,10 +1290,119 @@ class BillTracker(QMainWindow):
         # Initialize the trie for name suggestions
         self.trie = Trie()
         self.load_names_into_trie()
-
-        self.init_photos_page()
-        self.tab_widget.addTab(self.photos_page, "Photos")
     
+    def setup_ocr(self):
+        """Set up OCR functionality by trying to find Tesseract."""
+        if not HAS_OCR:
+            return
+        
+        # Try to locate Tesseract in well-known paths
+        # First, check if there's a tesseract_path.txt file
+        try:
+            if os.path.exists('tesseract_path.txt'):
+                with open('tesseract_path.txt', 'r') as f:
+                    path = f.read().strip()
+                    if path and os.path.exists(path) and os.path.isfile(path):
+                        OCRHelper.set_tesseract_path(path)
+                        return
+        except Exception as e:
+            print(f"Error reading tesseract_path.txt: {e}")
+        
+        # Try to locate Tesseract automatically
+        OCRHelper.configure_tesseract()
+    
+    def init_toolbar(self):
+        """Initialize the toolbar with language options."""
+        # Language selector
+        language_label = QLabel(UIHelper.translate("Language") + ": ")
+        self.toolbar.addWidget(language_label)
+        
+        self.language_selector = QComboBox()
+        self.language_selector.addItem("English")
+        self.language_selector.addItem("Español")
+        self.language_selector.currentIndexChanged.connect(self.change_language)
+        self.toolbar.addWidget(self.language_selector)
+    
+    def change_language(self, index):
+        """Change the application language.
+        
+        Args:
+            index: Index of the selected language in the dropdown
+        """
+        language_code = "en" if index == 0 else "es"
+        UIHelper.translator.set_language(language_code)
+        self.update_ui_translations()
+    
+    def update_ui_translations(self):
+        """Update all UI element translations when language changes."""
+        # Update window title
+        self.setWindowTitle(UIHelper.translate('Bill Tracker'))
+        
+        # Update tab names
+        self.tab_widget.setTabText(0, UIHelper.translate("Bill Entry"))
+        self.tab_widget.setTabText(1, UIHelper.translate("Print Page"))
+        self.tab_widget.setTabText(2, UIHelper.translate("Delete Page"))
+        self.tab_widget.setTabText(3, UIHelper.translate("Data"))
+        self.tab_widget.setTabText(4, UIHelper.translate("Settings"))
+        self.tab_widget.setTabText(5, UIHelper.translate("Photos"))
+        
+        # Update all widgets with stored original text
+        self.update_widget_translations(self)
+        
+        # Update OCR button tooltip if OCR is not available
+        if hasattr(self, 'scan_button') and not OCRHelper.is_available():
+            self.scan_button.setToolTip(UIHelper.translate(
+                "OCR functionality requires pytesseract, Pillow, and OpenCV. Please install these packages to use receipt scanning."
+            ))
+        
+        # Refresh tables with translated headers
+        if hasattr(self, 'bill_table') and hasattr(self.bill_table, 'property') and self.bill_table.property("original_headers"):
+            headers = self.bill_table.property("original_headers")
+            translated_headers = [UIHelper.translate(header) for header in headers]
+            self.bill_table.setHorizontalHeaderLabels(translated_headers)
+            
+        if hasattr(self, 'present_bill_table') and hasattr(self.present_bill_table, 'property') and self.present_bill_table.property("original_headers"):
+            headers = self.present_bill_table.property("original_headers")
+            translated_headers = [UIHelper.translate(header) for header in headers]
+            self.present_bill_table.setHorizontalHeaderLabels(translated_headers)
+            
+        if hasattr(self, 'delete_table') and hasattr(self.delete_table, 'property') and self.delete_table.property("original_headers"):
+            headers = self.delete_table.property("original_headers")
+            translated_headers = [UIHelper.translate(header) for header in headers]
+            self.delete_table.setHorizontalHeaderLabels(translated_headers)
+            
+        if hasattr(self, 'data_table') and hasattr(self.data_table, 'property') and self.data_table.property("original_headers"):
+            headers = self.data_table.property("original_headers")
+            translated_headers = [UIHelper.translate(header) for header in headers]
+            self.data_table.setHorizontalHeaderLabels(translated_headers)
+            
+        # Update category buttons
+        for category, button in self.category_buttons.items():
+            button.setText(UIHelper.translate(category))
+    
+    def update_widget_translations(self, parent_widget):
+        """Recursively update translations of all child widgets.
+        
+        Args:
+            parent_widget: The parent widget to update
+        """
+        for child in parent_widget.findChildren(QWidget):
+            # Update QPushButton text
+            if isinstance(child, QPushButton) and child.property("original_text"):
+                child.setText(UIHelper.translate(child.property("original_text")))
+                
+            # Update QLabel text
+            elif isinstance(child, QLabel) and child.property("original_text"):
+                child.setText(UIHelper.translate(child.property("original_text")))
+                
+            # Update QLineEdit placeholder
+            elif isinstance(child, QLineEdit) and child.property("original_placeholder"):
+                child.setPlaceholderText(UIHelper.translate(child.property("original_placeholder")))
+                
+            # Recursively update child widgets
+            if child.children():
+                self.update_widget_translations(child)
+
     def load_names_into_trie(self):
         # Load names from unique_names.json and insert them into the trie
         with open('unique_names.json', 'r') as file:
@@ -120,133 +1411,294 @@ class BillTracker(QMainWindow):
             self.trie.insert(name)
 
     def init_print_page(self):
+        """Initialize the Print Page tab with filter and display options."""
         self.print_page = QWidget()
         self.print_layout = QVBoxLayout()
         self.print_page.setLayout(self.print_layout)
 
+        # Section: Date range filter
+        self.print_layout.addWidget(UIHelper.create_section_label("Filter Bills by Date Range"))
+        
         # Date Range Inputs
         date_range_layout = QHBoxLayout()
-
-        self.start_date_input = QLineEdit()
-        self.start_date_input.setPlaceholderText("Start date (MM/dd/yyyy)")
+        
+        self.start_date_input = UIHelper.create_date_input()
         date_range_layout.addWidget(self.start_date_input)
-
-        self.end_date_input = QLineEdit()
-        self.end_date_input.setPlaceholderText("End date (MM/dd/yyyy)")
+        
+        self.end_date_input = UIHelper.create_date_input()
         date_range_layout.addWidget(self.end_date_input)
-
+        
         self.print_layout.addLayout(date_range_layout)
-
-        # Button to filter by date range
-        self.filter_button = QPushButton("Filter by Date Range")
-        self.filter_button.clicked.connect(self.filter_by_date_range)
+        
+        # Filter button
+        self.filter_button = UIHelper.create_button("Filter by Date Range", self.filter_by_date_range)
         self.print_layout.addWidget(self.filter_button)
-
+        
+        UIHelper.add_section_spacing(self.print_layout)
+        
+        # Section: Sort options
+        self.print_layout.addWidget(UIHelper.create_section_label("Sort Options"))
+        
         # Sort buttons
         sort_buttons_layout = QHBoxLayout()
-
-        self.sort_asc_button = QPushButton("Sort by Date (Ascending)")
-        self.sort_asc_button.clicked.connect(lambda: self.sort_table("asc"))
+        
+        self.sort_asc_button = UIHelper.create_button("Sort by Date (Ascending)", lambda: self.sort_table("asc"))
         sort_buttons_layout.addWidget(self.sort_asc_button)
-
-        self.sort_desc_button = QPushButton("Sort by Date (Descending)")
-        self.sort_desc_button.clicked.connect(lambda: self.sort_table("desc"))
+        
+        self.sort_desc_button = UIHelper.create_button("Sort by Date (Descending)", lambda: self.sort_table("desc"))
         sort_buttons_layout.addWidget(self.sort_desc_button)
-
+        
         self.print_layout.addLayout(sort_buttons_layout)
-
+        
+        UIHelper.add_section_spacing(self.print_layout)
+        
+        # Section: Actions
+        self.print_layout.addWidget(UIHelper.create_section_label("Actions"))
+        
         # Print and Show All Bills buttons
         buttons_layout = QHBoxLayout()
-
-        self.print_button = QPushButton("Print Bills")
-        self.print_button.clicked.connect(self.print_bills)
+        
+        self.print_button = UIHelper.create_button("Print Bills", self.print_bills)
         buttons_layout.addWidget(self.print_button)
-
-        self.show_all_button = QPushButton("Show All Bills")
-        self.show_all_button.clicked.connect(self.load_bills)
+        
+        self.show_all_button = UIHelper.create_button("Show All Bills", self.load_bills)
         buttons_layout.addWidget(self.show_all_button)
-
+        
         self.print_layout.addLayout(buttons_layout)
-
+        
+        UIHelper.add_section_spacing(self.print_layout)
+        
+        # Section: Database Selection
+        self.print_layout.addWidget(UIHelper.create_section_label("Select Year"))
+        
         # Database selection dropdown
         self.year_selector = QComboBox()
         self.year_selector.addItem("Present Database")
         self.year_selector.currentIndexChanged.connect(self.load_bills)
         self.print_layout.addWidget(self.year_selector)
-
+        
+        UIHelper.add_section_spacing(self.print_layout)
+        
+        # Section: Bills Table
+        self.print_layout.addWidget(UIHelper.create_section_label("Bills"))
+        
         # Table to display bills
-        self.bill_table = QTableWidget(0, 3)
-        self.bill_table.setHorizontalHeaderLabels(["Date", "Name", "Price"])
+        self.bill_table = UIHelper.create_table(3, ["Date", "Name", "Price"])
         self.print_layout.addWidget(self.bill_table)
 
     def init_bill_page(self):
+        """Initialize the Bill Entry tab with form and category selection."""
         self.bill_page = QWidget()
         self.bill_layout = QVBoxLayout()
         self.bill_page.setLayout(self.bill_layout)
 
+        # Section: Date Selection
+        self.bill_layout.addWidget(UIHelper.create_section_label("Select Date"))
+        
         # Calendar
         self.calendar = QCalendarWidget()
-        self.calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader) # removes #s on the side
+        self.calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
         self.bill_layout.addWidget(self.calendar)
 
-        # Manaul date input
-        self.date_input = QLineEdit()
-        self.date_input.setPlaceholderText("Enter date (MM/dd/yyyy)")
+        # Manual date input
+        self.date_input = UIHelper.create_date_input()
         self.bill_layout.addWidget(self.date_input)
+        
+        UIHelper.add_section_spacing(self.bill_layout)
+        
+        # Section: Bill Details
+        self.bill_layout.addWidget(UIHelper.create_section_label("Bill Details"))
 
         # Name input
-        self.name_input = QLineEdit()
-        self.name_input.setPlaceholderText("Enter bill name")
+        self.name_input = UIHelper.create_input_field("Enter bill name")
         self.name_input.textChanged.connect(self.show_autocomplete_suggestions)
         self.bill_layout.addWidget(self.name_input)
 
         # Autocomplete suggestions list
         self.suggestions_list = QListWidget()
-        self.suggestions_list.setFixedHeight(200)
+        self.suggestions_list.setFixedHeight(150)
         self.suggestions_list.itemClicked.connect(self.select_suggestion)
         self.bill_layout.addWidget(self.suggestions_list)
 
         # Amount input
-        self.price_input = QLineEdit()
-        self.price_input.setPlaceholderText("Enter price")
+        self.price_input = UIHelper.create_input_field("Enter price")
         self.bill_layout.addWidget(self.price_input)
-
+        
+        UIHelper.add_section_spacing(self.bill_layout)
+        
+        # Section: Categories
+        self.bill_layout.addWidget(UIHelper.create_section_label("Select Categories"))
+        
         # Category buttons
         self.category_buttons = {}
-        self.categories = self.predefined_order  # Changed from category_order
+        self.categories = self.predefined_order
         self.category_layout = QGridLayout()
+        
         for i, category in enumerate(self.categories):
-            button = QPushButton(category)
-            button.clicked.connect(partial(self.add_category, category))
-            button.setFixedHeight(50)  # Set the height of the button
+            button = UIHelper.create_button(category, partial(self.add_category, category))
             self.category_layout.addWidget(button, i // 5, i % 5)
             self.category_buttons[category] = button
+            
         self.bill_layout.addLayout(self.category_layout)
+        
+        UIHelper.add_section_spacing(self.bill_layout)
+        
+        # Section: Add Photo
+        self.bill_layout.addWidget(UIHelper.create_section_label("Bill Photo"))
 
+        # Image buttons layout
+        image_buttons_layout = QHBoxLayout()
+        
         # Image selection button
-        self.image_button = QPushButton("Add Photo")
-        self.image_button.clicked.connect(self.select_photo)
-        self.bill_layout.addWidget(self.image_button)
+        self.image_button = UIHelper.create_button("Add Photo", self.select_photo)
+        image_buttons_layout.addWidget(self.image_button)
+        
+        # OCR scan button (if OCR is available)
+        self.scan_button = UIHelper.create_button("Scan Receipt", self.scan_receipt)
+        self.scan_button.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.scan_button.customContextMenuRequested.connect(self.show_scan_context_menu)
+        image_buttons_layout.addWidget(self.scan_button)
+        
+        # Check OCR availability and update the scan button state
+        self.update_scan_button_state()
+        
+        self.bill_layout.addLayout(image_buttons_layout)
 
         # Image preview
         self.image_preview = QLabel()
-        self.image_preview.setFixedSize(200, 200)  # Set a fixed size for preview
+        self.image_preview.setFixedSize(200, 200)
         self.image_preview.setScaledContents(True)
         self.bill_layout.addWidget(self.image_preview)
-
-        # Store selected image path
-        self.selected_image_path = None
-    
-        # Save button
-        self.save_button = QPushButton("Save Bill")
-        self.save_button.clicked.connect(self.save_bill)
+        
+        UIHelper.add_section_spacing(self.bill_layout)
+        
+        # Section: Save
+        self.save_button = UIHelper.create_button("Save Bill", self.save_bill)
         self.bill_layout.addWidget(self.save_button)
-
+        
+        UIHelper.add_section_spacing(self.bill_layout)
+        
+        # Section: Recent Bills
+        self.bill_layout.addWidget(UIHelper.create_section_label("Recent Bills"))
+        
         # Table to display bills (only present database)
-        self.present_bill_table = QTableWidget(0, 3)
-        self.present_bill_table.setHorizontalHeaderLabels(["Date", "Name", "Price"])
+        self.present_bill_table = UIHelper.create_table(3, ["Date", "Name", "Price"])
         self.bill_layout.addWidget(self.present_bill_table)
 
+    def update_scan_button_state(self):
+        """Update the scan button state based on OCR availability."""
+        is_ocr_available = OCRHelper.is_available()
+        self.scan_button.setEnabled(is_ocr_available)
+        
+        if not is_ocr_available:
+            if not HAS_OCR:
+                # OCR libraries not installed
+                self.scan_button.setToolTip(UIHelper.translate(
+                    "OCR functionality requires pytesseract, Pillow, and OpenCV. Please install these packages to use receipt scanning."
+                ))
+            else:
+                # OCR libraries installed but Tesseract not found
+                self.scan_button.setToolTip(UIHelper.translate(
+                    "Tesseract OCR not found. Right-click to configure Tesseract path."
+                ))
+    
+    def show_scan_context_menu(self, position):
+        """Show a context menu for the scan button with OCR configuration options."""
+        menu = QMenu(self)
+        
+        # Add an action to configure Tesseract path
+        configure_action = menu.addAction(UIHelper.translate("Configure Tesseract Path"))
+        configure_action.triggered.connect(self.show_tesseract_config_dialog)
+        
+        # Show the menu at the requested position
+        menu.exec_(self.scan_button.mapToGlobal(position))
+    
+    def show_tesseract_config_dialog(self):
+        """Show the dialog for configuring Tesseract path."""
+        dialog = TesseractConfigDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            # Update the scan button state
+            self.update_scan_button_state()
+    
+    def scan_receipt(self):
+        """Scan a receipt using OCR to extract bill information."""
+        # Check if OCR is available
+        if not HAS_OCR:
+            QMessageBox.warning(
+                self, 
+                UIHelper.translate("OCR Not Available"), 
+                UIHelper.translate("OCR functionality requires pytesseract, Pillow, and OpenCV. Please install these packages to use receipt scanning.")
+            )
+            return
+        
+        # Select an image first
+        options = QFileDialog.Options()
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, 
+            "Select Receipt Image", 
+            "", 
+            "Images (*.png *.jpg *.jpeg *.bmp);;All Files (*)", 
+            options=options
+        )
+        
+        if not file_path:
+            return  # User canceled
+        
+        # Show image preview
+        self.selected_image_path = file_path
+        self.image_preview.setPixmap(QPixmap(file_path))
+        
+        # Create and show progress dialog
+        progress_dialog = QDialog(self)
+        progress_dialog.setWindowTitle(UIHelper.translate("Processing Receipt"))
+        progress_dialog.setFixedSize(300, 100)
+        
+        # Set up dialog layout
+        layout = QVBoxLayout()
+        progress_dialog.setLayout(layout)
+        
+        # Add progress bar and label
+        progress_label = QLabel(UIHelper.translate("Extracting information from receipt..."))
+        layout.addWidget(progress_label)
+        
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, 100)
+        layout.addWidget(progress_bar)
+        
+        # Create worker thread for OCR processing
+        self.ocr_worker = OCRWorker(file_path)
+        self.ocr_worker.progress.connect(progress_bar.setValue)
+        self.ocr_worker.finished.connect(lambda results: self.handle_ocr_results(results, progress_dialog))
+        
+        # Show dialog and start worker
+        progress_dialog.show()
+        
+        try:
+            self.ocr_worker.start()
+        except Exception as e:
+            # Close the progress dialog
+            progress_dialog.accept()
+            
+            error_msg = str(e)
+            if "tesseract is not installed" in error_msg or "not in your PATH" in error_msg:
+                # Tesseract not found, prompt user to configure it
+                result = QMessageBox.question(
+                    self, 
+                    UIHelper.translate("Tesseract Not Found"), 
+                    UIHelper.translate("Tesseract OCR is not installed or not in your PATH. Would you like to configure the Tesseract path manually?"),
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                
+                if result == QMessageBox.Yes:
+                    self.show_tesseract_config_dialog()
+            else:
+                # Other error
+                QMessageBox.critical(
+                    self, 
+                    UIHelper.translate("OCR Error"), 
+                    f"{UIHelper.translate('An error occurred during OCR processing:')} {str(e)}"
+                )
+    
     def select_photo(self):
         options = QFileDialog.Options()
         file_path, _ = QFileDialog.getOpenFileName(self, "Select Bill Image", "", "Images (*.png *.jpg *.jpeg *.bmp);;All Files (*)", options=options)
@@ -254,7 +1706,45 @@ class BillTracker(QMainWindow):
         if file_path:
             self.selected_image_path = file_path
             self.image_preview.setPixmap(QPixmap(file_path))  # Show image preview
-
+    
+    def handle_ocr_results(self, ocr_results, progress_dialog):
+        """Handle the results from OCR processing.
+        
+        Args:
+            ocr_results: Dictionary of OCR results (vendor, date, amount)
+            progress_dialog: Progress dialog to close
+        """
+        # Close the progress dialog
+        progress_dialog.accept()
+        
+        # Show confirmation dialog with results
+        dialog = OCRResultsDialog(self, ocr_results)
+        if dialog.exec_() == QDialog.Accepted:
+            result = dialog.get_result()
+            
+            if result["accepted"]:
+                # Apply the values to the form
+                if result["date"]:
+                    self.date_input.setText(result["date"])
+                
+                if result["vendor"]:
+                    self.name_input.setText(result["vendor"])
+                
+                if result["amount"]:
+                    self.price_input.setText(result["amount"])
+                
+                # If edit is needed, focus on the first field that needs editing
+                if result.get("edit_needed", False):
+                    if not result["date"]:
+                        self.date_input.setFocus()
+                    elif not result["vendor"]:
+                        self.name_input.setFocus()
+                    elif not result["amount"]:
+                        self.price_input.setFocus()
+                    else:
+                        # Focus on vendor field for standard editing
+                        self.name_input.setFocus()
+    
     def show_autocomplete_suggestions(self):
         query = self.name_input.text()
         suggestions = self.trie.get_suggestions(query)
@@ -267,37 +1757,43 @@ class BillTracker(QMainWindow):
     
     def load_present_bills(self):
         self.present_bill_table.setRowCount(0)  # Clear the table
-        query = "SELECT date, name, price FROM bills"
-        cursor = self.conn.execute(query)
         
-        for row in cursor:
+        bills = self.db_manager.get_bills()
+        
+        for bill in bills:
             row_count = self.present_bill_table.rowCount()
             self.present_bill_table.insertRow(row_count)
-            self.present_bill_table.setItem(row_count, 0, QTableWidgetItem(row[0]))
-            self.present_bill_table.setItem(row_count, 1, QTableWidgetItem(row[1]))
-            self.present_bill_table.setItem(row_count, 2, QTableWidgetItem(row[2]))
+            self.present_bill_table.setItem(row_count, 0, QTableWidgetItem(bill[0]))
+            self.present_bill_table.setItem(row_count, 1, QTableWidgetItem(bill[1]))
+            self.present_bill_table.setItem(row_count, 2, QTableWidgetItem(bill[2]))
     
     def init_photos_page(self):
+        """Initialize the Photos tab for viewing bill images."""
         self.photos_page = QWidget()
         self.photos_layout = QVBoxLayout()
         self.photos_page.setLayout(self.photos_layout)
 
+        # Section: Filter Photos
+        self.photos_layout.addWidget(UIHelper.create_section_label("Filter Photos by Date"))
+        
         # Date filter inputs
         date_filter_layout = QHBoxLayout()
 
-        self.photo_start_date_input = QLineEdit()
-        self.photo_start_date_input.setPlaceholderText("Start date (MM/dd/yyyy)")
+        self.photo_start_date_input = UIHelper.create_date_input()
         date_filter_layout.addWidget(self.photo_start_date_input)
 
-        self.photo_end_date_input = QLineEdit()
-        self.photo_end_date_input.setPlaceholderText("End date (MM/dd/yyyy)")
+        self.photo_end_date_input = UIHelper.create_date_input()
         date_filter_layout.addWidget(self.photo_end_date_input)
 
-        self.filter_photos_button = QPushButton("Filter Photos")
-        self.filter_photos_button.clicked.connect(self.filter_photos_by_date)
+        self.filter_photos_button = UIHelper.create_button("Filter Photos", self.filter_photos_by_date)
         date_filter_layout.addWidget(self.filter_photos_button)
 
         self.photos_layout.addLayout(date_filter_layout)
+        
+        UIHelper.add_section_spacing(self.photos_layout)
+        
+        # Section: Photo Gallery
+        self.photos_layout.addWidget(UIHelper.create_section_label("Photo Gallery"))
 
         # Scrollable image view
         self.scroll_area = QScrollArea()
@@ -307,16 +1803,18 @@ class BillTracker(QMainWindow):
         self.scroll_area.setWidgetResizable(True)
         self.photos_layout.addWidget(self.scroll_area)
 
+        # Load images 
         self.load_all_photos()
     
     def load_all_photos(self):
+        """Load all photos from the database."""
         self.clear_layout(self.scroll_layout)  # Clear previous images
-
-        query = "SELECT date, image FROM bills WHERE image IS NOT NULL"
-        cursor = self.conn.execute(query)
-
-        for row in cursor:
-            date, image_filename = row
+        
+        # Get all bill images
+        bill_images = self.db_manager.get_bill_images()
+        
+        # Add images to the photos page
+        for date, image_filename in bill_images:
             if image_filename:
                 image_path = os.path.join("bill_images", image_filename)
                 if os.path.exists(image_path):
@@ -330,164 +1828,122 @@ class BillTracker(QMainWindow):
         self.scroll_layout.addWidget(image_label)
     
     def filter_photos_by_date(self):
-        try:
-            date_formats = ["%m/%d/%y", "%m/%d/%Y"]
-
-            def parse_date(date_text):
-                for date_format in date_formats:
-                    try:
-                        return datetime.strptime(date_text, date_format).strftime("%m/%d/%Y")
-                    except ValueError:
-                        continue
-                raise ValueError("Invalid date format")
-            
-            start_date = parse_date(self.photo_start_date_input.text())
-            end_date = parse_date(self.photo_end_date_input.text())
-
-            # Convert the text inputs to datetime objects
-            start_date = datetime.strptime(start_date, "%m/%d/%Y")
-            end_date = datetime.strptime(end_date, "%m/%d/%Y")
-        except ValueError:
-            # If invalid date range or conversion error occurs, show all entries in the database        
-            # Load all bills (no filtering)
+        """Filter photos by date range."""
+        start_date, end_date = DateHelper.parse_date_range(
+            self.photo_start_date_input.text(),
+            self.photo_end_date_input.text()
+        )
+        
+        if not start_date or not end_date:
+            # If invalid date range, show all photos
             self.load_all_photos()
             return
-
+            
         self.clear_layout(self.scroll_layout)  # Clear existing images
-
-        query = "SELECT date, image FROM bills WHERE image IS NOT NULL AND date BETWEEN ? AND ?"
-        cursor = self.conn.execute(query, (start_date.strftime("%m/%d/%Y"), end_date.strftime("%m/%d/%Y")))
-
-        for row in cursor:
-            date, image_filename = row
+        
+        # Get filtered bill images
+        bill_images = self.db_manager.get_bill_images(start_date, end_date)
+        
+        # Add images to the photos page
+        for date, image_filename in bill_images:
             if image_filename:
                 image_path = os.path.join("bill_images", image_filename)
                 if os.path.exists(image_path):
                     self.add_image_to_photos_page(date, image_path)
 
-
-
     def init_settings_page(self):
+        """Initialize the Settings tab for managing categories."""
         self.settings_page = QWidget()
         self.settings_layout = QVBoxLayout()
         self.settings_page.setLayout(self.settings_layout)
 
-        self.settings_label = QLabel("Edit Categories:")
-        self.settings_layout.addWidget(self.settings_label)
+        # Section: Add Category
+        self.settings_layout.addWidget(UIHelper.create_section_label("Add New Category"))
 
-        self.new_category_input = QLineEdit()
-        self.new_category_input.setPlaceholderText("Enter new category")
+        # New category input
+        self.new_category_input = UIHelper.create_input_field("Enter new category")
         self.settings_layout.addWidget(self.new_category_input)
 
-        self.add_category_button = QPushButton("Add Category")
-        self.add_category_button.clicked.connect(self.add_new_category)
+        # Add category button
+        self.add_category_button = UIHelper.create_button("Add Category", self.add_new_category)
         self.settings_layout.addWidget(self.add_category_button)
+        
+        UIHelper.add_section_spacing(self.settings_layout)
+        
+        # Section: Existing Categories
+        self.settings_layout.addWidget(UIHelper.create_section_label("Existing Categories"))
 
+        # Category list layout (populated in update_settings_page)
         self.category_list_layout = QVBoxLayout()
         self.settings_layout.addLayout(self.category_list_layout)
 
     def init_data_page(self):
+        """Initialize the Data tab for viewing monthly expenditure."""
         self.data_page = QWidget()
         self.data_layout = QVBoxLayout()
         self.data_page.setLayout(self.data_layout)
 
-        self.data_label = QLabel("Monthly Expenditure:")
-        self.data_layout.addWidget(self.data_label)
-
+        # Section: Year Selection
+        self.data_layout.addWidget(UIHelper.create_section_label("Select Year"))
+        
         self.data_year_selector = QComboBox()
         self.data_year_selector.addItem("Present Database")
         self.data_year_selector.currentIndexChanged.connect(self.load_data)
         self.data_layout.addWidget(self.data_year_selector)
+        
+        UIHelper.add_section_spacing(self.data_layout)
+        
+        # Section: Monthly Expenditure
+        self.data_layout.addWidget(UIHelper.create_section_label("Monthly Expenditure"))
 
-        self.data_table = QTableWidget(0, 4)
-        self.data_table.setHorizontalHeaderLabels(["Month", "Cash", "Not Cash", "Total"])
+        self.data_table = UIHelper.create_table(4, ["Month", "Cash", "Not Cash", "Total"])
         self.data_layout.addWidget(self.data_table)
     
-    def create_table(self):
-        query = """
-        CREATE TABLE IF NOT EXISTS bills (
-            id INTEGER PRIMARY KEY,
-            date TEXT,
-            name TEXT,
-            price TEXT,
-            image TEXT -- stores  the image filename
-        )
-        """
-        self.conn.execute(query)
-        self.conn.commit()
-    
     def load_existing_databases(self):
-        # Scan the current directory
-        for file in os.listdir('.'):
-            if file.startswith('bills_') and file.endswith('.db'):
-                year = file[6:10]
-                if year.isdigit():
-                    # Update the Main Page year selector
-                    if year not in [self.year_selector.itemText(i) for i in range(self.year_selector.count())]:
-                        self.year_selector.addItem(year)
-                    
-                    # Update the Data Page year selector
-                    if year not in [self.data_year_selector.itemText(i) for i in range(self.data_year_selector.count())]:
-                        self.data_year_selector.addItem(year)
-                    
-                    # Update the Delete Page year selector
-                    if year not in [self.delete_year_selector.itemText(i) for i in range(self.delete_year_selector.count())]:
-                        self.delete_year_selector.addItem(year)
-    
-    def sort_table(self, order):
-        rows = []
-        for row in range(self.bill_table.rowCount()):
-            date_item = self.bill_table.item(row, 0)
-            name_item = self.bill_table.item(row, 1)
-            price_item = self.bill_table.item(row, 2)
+        """Load existing year-specific databases into the selectors."""
+        years = self.db_manager.get_existing_databases()
+        
+        # Update the Main Page year selector
+        for year in years:
+            if year not in [self.year_selector.itemText(i) for i in range(self.year_selector.count())]:
+                self.year_selector.addItem(year)
             
-            if date_item and name_item and price_item:
-                date = datetime.strptime(date_item.text(), "%m/%d/%Y")
-                price = float(price_item.text().replace("$", ""))
-                name = name_item.text()
-                rows.append((date, price, name, row))  # Include the original row index
-
-        # Sort rows by date (desc/asc), price (desc), and name (alphabetically)
-        rows.sort(key=lambda x: (x[0], -x[1], x[2]), reverse=order=="desc")
-
-        # Clear and repopulate the table
-        self.bill_table.setRowCount(0)
-        for date, price, name, _ in rows:
-            row_count = self.bill_table.rowCount()
-            self.bill_table.insertRow(row_count)
-            self.bill_table.setItem(row_count, 0, QTableWidgetItem(date.strftime("%m/%d/%Y")))
-            self.bill_table.setItem(row_count, 1, QTableWidgetItem(name))
-            self.bill_table.setItem(row_count, 2, QTableWidgetItem(f"${price:.2f}"))
-
+            # Update the Data Page year selector
+            if year not in [self.data_year_selector.itemText(i) for i in range(self.data_year_selector.count())]:
+                self.data_year_selector.addItem(year)
+            
+            # Update the Delete Page year selector
+            if year not in [self.delete_year_selector.itemText(i) for i in range(self.delete_year_selector.count())]:
+                self.delete_year_selector.addItem(year)
+    
     def load_bills(self):
+        """Load bills into the bill table based on the selected year."""
         self.bill_table.setRowCount(0)  # Clear the table
         selected_year = self.year_selector.currentText()
-        if selected_year == "Present Database":
-            query = "SELECT date, name, price FROM bills"
-            cursor = self.conn.execute(query)
-        else:
-            conn = sqlite3.connect(f"bills_{selected_year}.db")
-            cursor = conn.execute("SELECT date, name, price FROM bills")
         
-        for row in cursor:
+        bills = self.db_manager.get_bills(selected_year)
+        
+        for bill in bills:
             row_count = self.bill_table.rowCount()
             self.bill_table.insertRow(row_count)
-            self.bill_table.setItem(row_count, 0, QTableWidgetItem(row[0]))
-            self.bill_table.setItem(row_count, 1, QTableWidgetItem(row[1]))
-            self.bill_table.setItem(row_count, 2, QTableWidgetItem(row[2]))
+            self.bill_table.setItem(row_count, 0, QTableWidgetItem(bill[0]))
+            self.bill_table.setItem(row_count, 1, QTableWidgetItem(bill[1]))
+            self.bill_table.setItem(row_count, 2, QTableWidgetItem(bill[2]))
     
     def save_bill(self):
+        """Save a bill to the database."""
+        # Get date from input or calendar
         if self.date_input.text():
             date_text = self.date_input.text()
-            date_formats = ["%m/%d/%y", "%m/%d/%Y"]
-            for date_format in date_formats:
+            for date_format in DATE_FORMATS:
                 try:
-                    date = datetime.strptime(date_text, date_format).strftime("%m/%d/%Y")
+                    date = datetime.strptime(date_text, date_format).strftime(DATE_FORMAT)
                     break
                 except ValueError:
                     continue
             else:
-                QMessageBox.warning(self, "Input Error", "Invalid date format. Please use MM/dd/yyyy.")
+                QMessageBox.warning(self, UIHelper.translate("Input Error"), 
+                                   UIHelper.translate("Invalid date format. Please use MM/dd/yyyy."))
                 return
         else:
             date = self.calendar.selectedDate().toString("MM/dd/yyyy")
@@ -497,65 +1953,35 @@ class BillTracker(QMainWindow):
 
         # Check if any field is empty
         if not date or not name or not price:
-            QMessageBox.warning(self, "Input Error", "Please enter date, name, and price.")
+            QMessageBox.warning(self, UIHelper.translate("Input Error"), 
+                               UIHelper.translate("Please enter date, name, and price."))
             return
         
-        # Determine the year and corresponding database
-        year = datetime.strptime(date, "%m/%d/%Y").year
-        db_name = f"bills_{year}.db"
-        conn = sqlite3.connect(db_name)
-        self.create_table_in_db(conn)
-
-        # Save to the corresponding database
-        query = "INSERT INTO bills (date, name, price) VALUES (?, ?, ?)"
-        conn.execute(query, (date, name, str(f"${float(price):.2f}")))
-        conn.commit()
-        conn.close()
-
-        # Save to the present in-memory database
-        self.conn.execute(query, (date, name, str(f"${float(price):.2f}")))
-        self.conn.commit()
-
-        # Add to table view
-        row_count = self.bill_table.rowCount()
-        self.bill_table.insertRow(row_count)
-        self.bill_table.setItem(row_count, 0, QTableWidgetItem(date))
-        self.bill_table.setItem(row_count, 1, QTableWidgetItem(name))
-        self.bill_table.setItem(row_count, 2, QTableWidgetItem(f"${float(price):.2f}"))
-
-        row_count = self.present_bill_table.rowCount()
-        self.present_bill_table.insertRow(row_count)
-        self.present_bill_table.setItem(row_count, 0, QTableWidgetItem(date))
-        self.present_bill_table.setItem(row_count, 1, QTableWidgetItem(name))
-        self.present_bill_table.setItem(row_count, 2, QTableWidgetItem(f"${float(price):.2f}"))
-
-        # Update year selectors after saving
-        self.load_existing_databases()
-
-        # Clear selected categories and update name input
-        self.selected_categories = []
-        self.update_name_input()
-
-        # Clear inputs after saving
-        self.price_input.clear()
-        self.name_input.clear()
-        self.date_input.clear()
-
-        # Save image (if selected)
-        image_filename = None
-        if self.selected_image_path:
-            image_folder = "bill_images"
-            os.makedirs(image_folder, exist_ok=True)  # Ensure folder exists
-            image_filename = f"{date.replace('/', '-')}_{name}.jpg"  # Unique name
-            dest_path = os.path.join(image_folder, image_filename)
-            shutil.copy(self.selected_image_path, dest_path)  # Copy image
+        # Save the bill using the database manager
+        success = self.db_manager.save_bill(date, name, price, self.selected_image_path)
+        
+        if success:
+            # Refresh the bill tables
+            self.load_bills()
+            self.load_present_bills()
+            
+            # Update year selectors after saving
+            self.load_existing_databases()
+            
+            # Clear selected categories and update name input
+            self.selected_categories = []
+            
+            # Clear inputs after saving
+            self.price_input.clear()
+            self.name_input.clear()
+            self.date_input.clear()
+            
+            # Clear selected image
+            self.selected_image_path = None
+            self.image_preview.clear()
         else:
-            image_filename = None  # No image selected
-
-        # Store in database
-        query = "INSERT INTO bills (date, name, price, image) VALUES (?, ?, ?, ?)"
-        self.conn.execute(query, (date, name, f"${float(price):.2f}", image_filename))
-        self.conn.commit()
+            QMessageBox.critical(self, UIHelper.translate("Error"), 
+                                UIHelper.translate("Failed to save bill. Please try again."))
     
     def create_table_in_db(self, conn):
         query = """
@@ -576,7 +2002,6 @@ class BillTracker(QMainWindow):
         else:
             self.selected_categories.append(category)
         self.update_name_input()
-
 
     def update_name_input(self):
         current_text = self.name_input.text().split('(')[0].strip()
@@ -610,15 +2035,22 @@ class BillTracker(QMainWindow):
             self.update_settings_page()  # No longer modifying category_order
     
     def update_settings_page(self):
+        """Update the settings page category list."""
         self.clear_layout(self.category_list_layout)
 
         for category in self.categories:
             category_layout = QHBoxLayout()
+            
+            # Category name label
             category_label = QLabel(category)
-            delete_button = QPushButton("Delete")
-            delete_button.clicked.connect(partial(self.delete_category, category))
+            category_label.setStyleSheet("font-size: 16px;")
             category_layout.addWidget(category_label)
+            
+            # Delete button
+            delete_button = UIHelper.create_button("Delete", partial(self.delete_category, category))
+            delete_button.setMaximumWidth(100)
             category_layout.addWidget(delete_button)
+            
             self.category_list_layout.addLayout(category_layout)
     
     def clear_layout(self, layout):
@@ -631,52 +2063,21 @@ class BillTracker(QMainWindow):
                 self.clear_layout(item.layout())
 
     def load_categories(self):
-        try:
-            with open("categories.json", "r") as file:
-                return json.load(file)
-        except FileNotFoundError:
-            return ["Mortgage", "Food", "Gas", "Mechanic", "Work Clothes", "Materials", "Miscellaneous", "Doctor", "Equipment & Rent", "Cash"]
-
+        """Load categories from the settings manager."""
+        return SettingsManager.load_categories()
+    
     def save_categories(self):
-        with open("categories.json", "w") as file:
-            json.dump(self.categories, file)
+        """Save categories using the settings manager."""
+        SettingsManager.save_categories(self.categories)
     
     def load_data(self):
+        """Load monthly expenditure data based on the selected year."""
         self.data_table.setRowCount(0)  # Clear the table
         selected_year = self.data_year_selector.currentText()
-
-        # Determine which database to query
-        if selected_year == "Present Database":
-            query = "SELECT date, price, name FROM bills"
-            cursor = self.conn.execute(query)
-        else:
-            conn = sqlite3.connect(f"bills_{selected_year}.db")
-            cursor = conn.execute("SELECT date, price, name FROM bills")
-
-        # Initialize monthly totals
-        monthly_totals = {month: {"cash": 0, "not_cash": 0, "total": 0} for month in range(1, 13)}
-        yearly_totals = {"cash": 0, "not_cash": 0, "total": 0}
-
-        for row in cursor:
-            date = row[0]
-            price = float(row[1].replace("$", ""))  # Convert price string to float
-            name = row[2]
-            
-            # Extract the month from the date
-            month = datetime.strptime(date, "%m/%d/%Y").month
-
-            # Determine if it's a cash transaction
-            if "Cash" in name:
-                monthly_totals[month]["cash"] += price
-                yearly_totals["cash"] += price
-            else:
-                monthly_totals[month]["not_cash"] += price
-                yearly_totals["not_cash"] += price
-
-            # Update monthly and yearly totals
-            monthly_totals[month]["total"] += price
-            yearly_totals["total"] += price
-
+        
+        # Get monthly and yearly totals
+        monthly_totals, yearly_totals = self.db_manager.get_monthly_totals(selected_year)
+        
         # Populate the data table with monthly totals
         for month in range(1, 13):
             row_count = self.data_table.rowCount()
@@ -685,7 +2086,7 @@ class BillTracker(QMainWindow):
             self.data_table.setItem(row_count, 1, QTableWidgetItem(f"${monthly_totals[month]['cash']:.2f}"))
             self.data_table.setItem(row_count, 2, QTableWidgetItem(f"${monthly_totals[month]['not_cash']:.2f}"))
             self.data_table.setItem(row_count, 3, QTableWidgetItem(f"${monthly_totals[month]['total']:.2f}"))
-
+        
         # Add yearly totals as the last row
         row_count = self.data_table.rowCount()
         self.data_table.insertRow(row_count)
@@ -751,142 +2152,87 @@ class BillTracker(QMainWindow):
         page_setup_dialog.exec_()
     
     def filter_by_date_range(self):
-        try:
-            date_formats = ["%m/%d/%y", "%m/%d/%Y"]
-            
-            def parse_date(date_text):
-                for date_format in date_formats:
-                    try:
-                        return datetime.strptime(date_text, date_format).strftime("%m/%d/%Y")
-                    except ValueError:
-                        continue
-                raise ValueError("Invalid date format")
-            
-            start_date_text = parse_date(self.start_date_input.text())
-            end_date_text = parse_date(self.end_date_input.text())
-
-            # Convert the text inputs to datetime objects
-            start_date = datetime.strptime(start_date_text, "%m/%d/%Y")
-            end_date = datetime.strptime(end_date_text, "%m/%d/%Y")
-        except ValueError as e:
-            # If invalid date range or conversion error occurs, show all entries in the database        
-            # Load all bills (no filtering)
-            self.load_all_bills()
+        """Filter the bill table by date range."""
+        start_date, end_date = DateHelper.parse_date_range(
+            self.start_date_input.text(), 
+            self.end_date_input.text()
+        )
+        
+        if not start_date or not end_date:
+            # If invalid date range, show all bills
+            self.load_bills()
             return
-
+            
         # Load bills within the date range
         self.bill_table.setRowCount(0)  # Clear the table
         selected_year = self.year_selector.currentText()
-
-        if selected_year == "Present Database":
-            query = "SELECT date, name, price FROM bills WHERE date BETWEEN ? AND ?"
-            cursor = self.conn.execute(query, (start_date.strftime("%m/%d/%Y"), end_date.strftime("%m/%d/%Y")))
-        else:
-            conn = sqlite3.connect(f"bills_{selected_year}.db")
-            query = "SELECT date, name, price FROM bills WHERE date BETWEEN ? AND ?"
-            cursor = conn.execute(query, (start_date.strftime("%m/%d/%Y"), end_date.strftime("%m/%d/%Y")))
-
+        
+        bills = self.db_manager.get_bills(
+            selected_year, 
+            start_date, 
+            end_date
+        )
+        
         # Populate the table with the filtered bills
-        for row in cursor:
+        for bill in bills:
             row_count = self.bill_table.rowCount()
             self.bill_table.insertRow(row_count)
-            self.bill_table.setItem(row_count, 0, QTableWidgetItem(row[0]))
-            self.bill_table.setItem(row_count, 1, QTableWidgetItem(row[1]))
-            self.bill_table.setItem(row_count, 2, QTableWidgetItem(row[2]))
-    
-    def load_all_bills(self):
-        # Function to load all bills if date range is invalid
-        self.bill_table.setRowCount(0)  # Clear the table
-        selected_year = self.year_selector.currentText()
-
-        if selected_year == "Present Database":
-            query = "SELECT date, name, price FROM bills"
-            cursor = self.conn.execute(query)
-        else:
-            conn = sqlite3.connect(f"bills_{selected_year}.db")
-            query = "SELECT date, name, price FROM bills"
-            cursor = conn.execute(query)
-
-        # Populate the table with all the bills
-        for row in cursor:
-            row_count = self.bill_table.rowCount()
-            self.bill_table.insertRow(row_count)
-            self.bill_table.setItem(row_count, 0, QTableWidgetItem(row[0]))
-            self.bill_table.setItem(row_count, 1, QTableWidgetItem(row[1]))
-            self.bill_table.setItem(row_count, 2, QTableWidgetItem(row[2]))
-
-    
-    def apply_styles(self):
-        self.setStyleSheet("""
-            QWidget {
-                font-size: 20px;
-            }
-            QMainWindow {
-                background-color: #f0f0f0;
-            }
-            QTabBar::tab {
-                height: 40px;
-                width: 150px;
-            }
-            QLineEdit, QTableWidget, QCalendarWidget, QPushButton {
-                color: black;
-                padding: 5px;
-            }
-            QPushButton {
-                background-color: #357a38;
-                color: white;
-                border: none;
-                border-radius: 5px;
-                min-height: 40px;
-            }
-            QPushButton:hover {
-                background-color: #45a049;
-            }
-            QTableWidget {
-                background-color: white;
-                border: 1px solid #ccc;
-            }
-        """)
+            self.bill_table.setItem(row_count, 0, QTableWidgetItem(bill[0]))
+            self.bill_table.setItem(row_count, 1, QTableWidgetItem(bill[1]))
+            self.bill_table.setItem(row_count, 2, QTableWidgetItem(bill[2]))
 
     def init_delete_page(self):
+        """Initialize the Delete Page tab for removing bills."""
         self.delete_page = QWidget()
         self.delete_layout = QVBoxLayout()
         self.delete_page.setLayout(self.delete_layout)
 
+        # Section: Search Bills
+        self.delete_layout.addWidget(UIHelper.create_section_label("Search Bills by Date"))
+        
         # Search by date
-        self.search_input = QLineEdit()
-        self.search_input.setPlaceholderText("Enter date (MM/dd/yyyy) to search")
+        self.search_input = UIHelper.create_date_input()
         self.delete_layout.addWidget(self.search_input)
 
-        self.search_button = QPushButton("Search")
-        self.search_button.clicked.connect(self.search_by_date)
+        self.search_button = UIHelper.create_button("Search", self.search_by_date)
         self.delete_layout.addWidget(self.search_button)
+        
+        UIHelper.add_section_spacing(self.delete_layout)
+        
+        # Section: Sort Options
+        self.delete_layout.addWidget(UIHelper.create_section_label("Sort Options"))
 
         # Sorting buttons
         sort_buttons_layout = QHBoxLayout()
 
-        self.sort_asc_button = QPushButton("Sort Ascending")
-        self.sort_asc_button.clicked.connect(lambda: self.sort_delete_table("asc"))
+        self.sort_asc_button = UIHelper.create_button("Sort Ascending", lambda: self.sort_delete_table("asc"))
         sort_buttons_layout.addWidget(self.sort_asc_button)
 
-        self.sort_desc_button = QPushButton("Sort Descending")
-        self.sort_desc_button.clicked.connect(lambda: self.sort_delete_table("desc"))
+        self.sort_desc_button = UIHelper.create_button("Sort Descending", lambda: self.sort_delete_table("desc"))
         sort_buttons_layout.addWidget(self.sort_desc_button)
 
         self.delete_layout.addLayout(sort_buttons_layout)
+        
+        UIHelper.add_section_spacing(self.delete_layout)
+        
+        # Section: Actions
+        self.delete_layout.addWidget(UIHelper.create_section_label("Actions"))
 
         # Show All Bills and Delete buttons
         buttons_layout = QHBoxLayout()
 
-        self.show_all_button = QPushButton("Show All Bills")
-        self.show_all_button.clicked.connect(self.load_delete_table)
+        self.show_all_button = UIHelper.create_button("Show All Bills", self.load_delete_table)
         buttons_layout.addWidget(self.show_all_button)
 
-        self.delete_button = QPushButton("Delete Selected")
-        self.delete_button.clicked.connect(self.delete_selected_row)
+        self.delete_button = UIHelper.create_button("Delete Selected", self.delete_selected_row)
         buttons_layout.addWidget(self.delete_button)
 
         self.delete_layout.addLayout(buttons_layout)
+        
+        UIHelper.add_section_spacing(self.delete_layout)
+        
+        # Section: Database Selection
+        self.delete_layout.addWidget(UIHelper.create_section_label("Select Year"))
 
         # Database selection dropdown
         self.delete_year_selector = QComboBox()
@@ -896,10 +2242,14 @@ class BillTracker(QMainWindow):
                 self.delete_year_selector.addItem(year)
         self.delete_year_selector.currentIndexChanged.connect(self.load_delete_table)
         self.delete_layout.addWidget(self.delete_year_selector)
+        
+        UIHelper.add_section_spacing(self.delete_layout)
+        
+        # Section: Bills Table
+        self.delete_layout.addWidget(UIHelper.create_section_label("Bills"))
 
         # Table to display bills
-        self.delete_table = QTableWidget(0, 3)
-        self.delete_table.setHorizontalHeaderLabels(["Date", "Name", "Price"])
+        self.delete_table = UIHelper.create_table(3, ["Date", "Name", "Price"])
         self.delete_layout.addWidget(self.delete_table)
 
     def load_delete_table(self):
@@ -950,22 +2300,27 @@ class BillTracker(QMainWindow):
         conn.close()
 
     def delete_selected_row(self):
+        """Delete the selected row from the database."""
         selected_row = self.delete_table.currentRow()
         if selected_row < 0:
-            QMessageBox.warning(self, "Selection Error", "No row selected.")
+            QMessageBox.warning(self, UIHelper.translate("Selection Error"), 
+                               UIHelper.translate("No row selected."))
             return
-
+            
         date = self.delete_table.item(selected_row, 0).text()
         name = self.delete_table.item(selected_row, 1).text()
         price = self.delete_table.item(selected_row, 2).text()
-
+        
         selected_year = self.delete_year_selector.currentText()
-        conn = sqlite3.connect(f"bills_{selected_year}.db")
-        conn.execute("DELETE FROM bills WHERE date = ? AND name = ? AND price = ?", (date, name, price))
-        conn.commit()
-        conn.close()
-
-        self.delete_table.removeRow(selected_row)
+        
+        # Delete the bill using the database manager
+        success = self.db_manager.delete_bill(selected_year, date, name, price)
+        
+        if success:
+            self.delete_table.removeRow(selected_row)
+        else:
+            QMessageBox.critical(self, UIHelper.translate("Error"), 
+                                UIHelper.translate("Failed to delete bill. Please try again."))
 
     def sort_delete_table(self, order):
         rows = []
@@ -989,6 +2344,167 @@ class BillTracker(QMainWindow):
             self.delete_table.setItem(row_count, 0, QTableWidgetItem(date.strftime("%m/%d/%Y")))
             self.delete_table.setItem(row_count, 1, QTableWidgetItem(name))
             self.delete_table.setItem(row_count, 2, QTableWidgetItem(f"${price:.2f}"))
+
+    def apply_styles(self):
+        """Apply stylesheet to the application for consistent styling."""
+        self.setStyleSheet("""
+            QWidget {
+                font-size: 12px;
+                font-family: Arial, sans-serif;
+            }
+            
+            QMainWindow {
+                background-color: #f8f9fa;
+            }
+            
+            QTabWidget::pane {
+                border: 1px solid #ddd;
+                background-color: white;
+                border-radius: 4px;
+            }
+            
+            QTabBar::tab {
+                background-color: #e9ecef;
+                color: #495057;
+                padding: 8px 16px;
+                margin-right: 2px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                border: 1px solid #ddd;
+                border-bottom: none;
+            }
+            
+            QTabBar::tab:selected {
+                background-color: white;
+                border-bottom-color: white;
+                color: #007bff;
+                font-weight: bold;
+            }
+            
+            QLineEdit {
+                padding: 8px;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                background-color: white;
+                selection-background-color: #007bff;
+            }
+            
+            QLineEdit:focus {
+                border: 1px solid #80bdff;
+                outline: 0;
+                box-shadow: 0 0 0 0.2rem rgba(0, 123, 255, 0.25);
+            }
+            
+            QPushButton {
+                background-color: #007bff;
+                color: white;
+                border: none;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-weight: bold;
+                min-height: 35px;
+            }
+            
+            QPushButton:hover {
+                background-color: #0069d9;
+                cursor: pointer;
+            }
+            
+            QPushButton:pressed {
+                background-color: #0062cc;
+            }
+            
+            QTableWidget {
+                background-color: white;
+                alternate-background-color: #f8f9fa;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                gridline-color: #ddd;
+            }
+            
+            QTableWidget::item {
+                padding: 4px;
+            }
+            
+            QTableWidget::item:selected {
+                background-color: #007bff;
+                color: white;
+            }
+            
+            QHeaderView::section {
+                background-color: #e9ecef;
+                color: #495057;
+                padding: 8px;
+                border: 1px solid #ddd;
+                font-weight: bold;
+            }
+            
+            QCalendarWidget {
+                background-color: white;
+                border: 1px solid #ddd;
+            }
+            
+            QCalendarWidget QToolButton {
+                background-color: #e9ecef;
+                color: #495057;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                padding: 4px;
+            }
+            
+            QCalendarWidget QMenu {
+                background-color: white;
+                border: 1px solid #ddd;
+            }
+            
+            QCalendarWidget QAbstractItemView:enabled {
+                background-color: white;
+                color: #212529;
+                selection-background-color: #007bff;
+                selection-color: white;
+            }
+            
+            QComboBox {
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                padding: 8px;
+                background-color: white;
+            }
+            
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 20px;
+                border-left: 1px solid #ced4da;
+            }
+            
+            QComboBox QAbstractItemView {
+                border: 1px solid #ced4da;
+                selection-background-color: #007bff;
+            }
+            
+            QScrollArea {
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                background-color: white;
+            }
+            
+            QListWidget {
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                background-color: white;
+                alternate-background-color: #f8f9fa;
+            }
+            
+            QListWidget::item {
+                padding: 4px;
+            }
+            
+            QListWidget::item:selected {
+                background-color: #007bff;
+                color: white;
+            }
+        """)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
