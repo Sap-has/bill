@@ -393,18 +393,6 @@ class TranslationManager:
         "No row selected.": {"es": "Ninguna fila seleccionada."},
         "Failed to delete bill. Please try again.": {"es": "Error al eliminar factura. Intente nuevamente."},
         
-        # Categories (default)
-        "Mortgage": {"es": "Mortgage"},
-        "Food": {"es": "Food"},
-        "Gas": {"es": "Gas"},
-        "Mechanic": {"es": "Mechanic"},
-        "Work Clothes": {"es": "Clothes"},
-        "Materials": {"es": "Materials"},
-        "Miscellaneous": {"es": "Miscellaneous"},
-        "Doctor": {"es": "Doctor"},
-        "Equipment & Rent": {"es": "Equipment & Rent"},
-        "Cash": {"es": "Cash"},
-        
         # Date placeholders
         "MM/dd/yyyy": {"es": "MM/dd/aaaa"},
         
@@ -1234,9 +1222,6 @@ class BillTracker(QMainWindow):
             translated_headers = [UIHelper.translate(header) for header in headers]
             self.data_table.setHorizontalHeaderLabels(translated_headers)
             
-        # Update category buttons
-        for category, button in self.category_buttons.items():
-            button.setText(UIHelper.translate(category))
 
     def update_scan_button_state(self):
         """Update the scan button state based on OCR availability."""
@@ -1690,8 +1675,12 @@ class BillTracker(QMainWindow):
         new_category = self.new_category_input.text()
         if new_category and new_category not in self.categories:
             self.categories.append(new_category)
+            
+            # Create a button without translation marking
             button = QPushButton(new_category)
+            button.setFixedHeight(40)
             button.clicked.connect(partial(self.add_category, new_category))
+            
             # Calculate position based on updated categories list
             row = (len(self.categories) - 1) // 5
             col = (len(self.categories) - 1) % 5
@@ -1700,7 +1689,7 @@ class BillTracker(QMainWindow):
             self.new_category_input.clear()
             self.save_categories()
             self.update_settings_page()  # No longer modifying category_order
-        
+    
     def delete_category(self, category):
         if category in self.categories:
             self.categories.remove(category)
@@ -2336,7 +2325,11 @@ class BillTracker(QMainWindow):
         self.category_layout = QGridLayout()
         
         for i, category in enumerate(self.categories):
-            button = UIHelper.create_button(category, partial(self.add_category, category))
+            # Create a button without translation marking
+            button = QPushButton(category)
+            button.setFixedHeight(40)
+            button.clicked.connect(partial(self.add_category, category))
+            
             self.category_layout.addWidget(button, i // 5, i % 5)
             self.category_buttons[category] = button
             
