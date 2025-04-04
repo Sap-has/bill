@@ -1753,15 +1753,6 @@ class BillTracker(QMainWindow):
             # Show success notification
             self.show_notification(UIHelper.translate("Bill saved successfully!"), "success")
             
-            # Also save the bill name to the trie for future autocomplete
-            if name not in self.trie.words:
-                self.trie.insert(name)
-                # Update the unique_names.json file
-                try:
-                    with open('unique_names.json', 'w') as file:
-                        json.dump(self.trie.words, file)
-                except Exception as e:
-                    print(f"Error saving unique names: {e}")
         else:
             self.show_notification(
                 UIHelper.translate("Failed to save bill. Please try again."), 
