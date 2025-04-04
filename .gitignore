@@ -1,0 +1,34 @@
+# Credentials and API keys
+mindee_api_key.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Bill application files
+bill_images/
+
+# Database files
+*.db
+
+# Virtual environments
+venv/
+ENV/ 

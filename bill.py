@@ -79,6 +79,7 @@ class MindeeHelper:
                     api_key = f.read().strip()
                     if api_key:
                         return MindeeHelper.set_api_key(api_key)
+            print("API key file not found or empty. Please configure your Mindee API key.")
             return False
         except Exception as e:
             print(f"Error loading Mindee API key: {e}")
