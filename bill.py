@@ -16,15 +16,7 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal
 import sqlite3
 import shutil
 
-# Try to import Mindee API
-try:
-    # from mindee import Client, PredictResponse, product
-    from mindee import Client, product
-    print("Mindee import successful")
-    HAS_OCR = True
-except ImportError as e:
-    print(f"Mindee import failed: {e}")
-    HAS_OCR = False
+from mindee import Client, product
 
 # Define constants
 DATE_FORMAT = "%m/%d/%Y"
@@ -39,6 +31,11 @@ class MindeeHelper:
     api_key = None
     mindee_client = None
     
+    # Track API usage
+    usage_file = "mindee_usage.json"
+    current_month_usage = 0
+    usage_month = None
+    
     @staticmethod
     def is_available():
         """Check if Mindee OCR is available (API key is set).
@@ -46,7 +43,103 @@ class MindeeHelper:
         Returns:
             bool: True if Mindee is available, False otherwise.
         """
-        return HAS_OCR and MindeeHelper.api_key is not None
+        return MindeeHelper.api_key is not None
+    
+    @staticmethod
+    def get_current_month():
+        """Get the current month and year as a string.
+        
+        Returns:
+            str: The current month in format 'MM-YYYY'
+        """
+        from datetime import datetime
+        return datetime.now().strftime("%m-%Y")
+    
+    @staticmethod
+    def load_usage_data():
+        """Load usage data from the JSON file.
+        
+        Returns:
+            bool: True if data was loaded successfully, False otherwise
+        """
+        try:
+            if os.path.exists(MindeeHelper.usage_file):
+                with open(MindeeHelper.usage_file, 'r') as f:
+                    data = json.load(f)
+                    current_month = MindeeHelper.get_current_month()
+                    
+                    # If it's a new month, reset the counter
+                    if data.get('month') == current_month:
+                        MindeeHelper.current_month_usage = data.get('usage', 0)
+                    else:
+                        MindeeHelper.current_month_usage = 0
+                        
+                    MindeeHelper.usage_month = current_month
+                    return True
+            else:
+                # Initialize with zero usage for current month
+                MindeeHelper.current_month_usage = 0
+                MindeeHelper.usage_month = MindeeHelper.get_current_month()
+                MindeeHelper.save_usage_data()
+                return True
+        except Exception as e:
+            print(f"Error loading usage data: {e}")
+            return False
+    
+    @staticmethod
+    def save_usage_data():
+        """Save current usage data to the JSON file.
+        
+        Returns:
+            bool: True if data was saved successfully, False otherwise
+        """
+        try:
+            data = {
+                'month': MindeeHelper.usage_month,
+                'usage': MindeeHelper.current_month_usage
+            }
+            with open(MindeeHelper.usage_file, 'w') as f:
+                json.dump(data, f)
+            return True
+        except Exception as e:
+            print(f"Error saving usage data: {e}")
+            return False
+    
+    @staticmethod
+    def increment_usage():
+        """Increment the usage counter and save.
+        
+        Returns:
+            int: Current month's usage count after incrementing
+        """
+        # Make sure we're tracking the current month
+        current_month = MindeeHelper.get_current_month()
+        if MindeeHelper.usage_month != current_month:
+            MindeeHelper.current_month_usage = 0
+            MindeeHelper.usage_month = current_month
+            
+        # Increment and save
+        MindeeHelper.current_month_usage += 1
+        MindeeHelper.save_usage_data()
+        return MindeeHelper.current_month_usage
+    
+    @staticmethod
+    def get_remaining_pages():
+        """Get the number of API calls remaining this month.
+        
+        Returns:
+            int: Number of API calls remaining out of 250
+        """
+        return max(0, 250 - MindeeHelper.current_month_usage)
+    
+    @staticmethod
+    def has_available_pages():
+        """Check if there are available API calls remaining this month.
+        
+        Returns:
+            bool: True if there are API calls remaining, False otherwise
+        """
+        return MindeeHelper.current_month_usage < 250
     
     @staticmethod
     def set_api_key(api_key):
@@ -61,6 +154,8 @@ class MindeeHelper:
         try:
             MindeeHelper.api_key = api_key
             MindeeHelper.mindee_client = Client(api_key=api_key)
+            # Load usage data when setting API key
+            MindeeHelper.load_usage_data()
             return True
         except Exception as e:
             print(f"Error setting Mindee API key: {e}")
@@ -128,6 +223,9 @@ class MindeeWorker(QThread):
             # Parse receipt using the Receipt API - use the client to parse, not the input_doc
             api_response = MindeeHelper.mindee_client.parse(product.ReceiptV5, input_doc)
             self.progress.emit(80)
+            
+            # Increment the API usage counter
+            MindeeHelper.increment_usage()
             
             prediction = api_response.document.inference.prediction
 
@@ -270,28 +368,11 @@ class TranslationManager:
         "Cancel": {"es": "Cancelar"},
         "Processing Receipt": {"es": "Procesando Recibo"},
         "Extracting information from receipt...": {"es": "Extrayendo información del recibo..."},
-        "OCR Not Available": {"es": "OCR No Disponible"},
-        "OCR functionality requires pytesseract, Pillow, and OpenCV. Please install these packages to use receipt scanning.": 
-            {"es": "La funcionalidad de OCR requiere pytesseract, Pillow y OpenCV. Por favor, instale estos paquetes para usar el escaneo de recibos."},
-        "Configure Tesseract Path": {"es": "Configurar Ruta de Tesseract"},
-        "Set Custom Tesseract Path": {"es": "Establecer Ruta Personalizada de Tesseract"},
-        "Tesseract Path:": {"es": "Ruta de Tesseract:"},
-        "Select Tesseract Executable": {"es": "Seleccionar Ejecutable de Tesseract"},
-        "Path validated successfully": {"es": "Ruta validada con éxito"},
-        "Invalid Tesseract path": {"es": "Ruta de Tesseract inválida"},
-        "Tesseract Test": {"es": "Prueba de Tesseract"},
-        "Test OCR": {"es": "Probar OCR"},
-        "OCR Testing Successful": {"es": "Prueba de OCR Exitosa"},
-        "OCR Test Failed": {"es": "Prueba de OCR Fallida"},
-        "Save": {"es": "Guardar"},
-        "Tesseract Not Found": {"es": "Tesseract No Encontrado"},
-        "OCR Error": {"es": "Error de OCR"},
-        "Tesseract OCR not found. Right-click to configure Tesseract path.": {"es": "Tesseract OCR no encontrado. Haga clic derecho para configurar la ruta de Tesseract."},
-        "Tesseract OCR is not installed or not in your PATH. Would you like to configure the Tesseract path manually?": {"es": "Tesseract OCR no está instalado o no está en su PATH. ¿Desea configurar la ruta de Tesseract manualmente?"},
-        "An error occurred during OCR processing:": {"es": "Ocurrió un error durante el procesamiento OCR:"},
-        "Please enter a Tesseract path": {"es": "Por favor ingrese una ruta de Tesseract"},
-        "Failed to set Tesseract path": {"es": "Error al establecer la ruta de Tesseract"},
-        "If Tesseract OCR is installed but not detected automatically, you can set the path to the executable manually below.": {"es": "Si Tesseract OCR está instalado pero no se detecta automáticamente, puede establecer la ruta al ejecutable manualmente a continuación."},
+        "API Limit Reached": {"es": "Límite de API Alcanzado"},
+        "You have reached the monthly limit of 250 pages for the Mindee API. The limit will reset at the beginning of next month.": {"es": "Has alcanzado el límite mensual de 250 páginas para la API de Mindee. El límite se restablecerá al comienzo del próximo mes."},
+        "Scan a receipt using OCR. {remaining} pages remaining this month.": {"es": "Escanear un recibo usando OCR. {remaining} páginas restantes este mes."},
+        "Mindee API key not set. Right-click to configure API key.": {"es": "Clave de API de Mindee no configurada. Haga clic derecho para configurar la clave de API."},
+        "You have reached the monthly limit of 250 pages for the Mindee API.": {"es": "Has alcanzado el límite mensual de 250 páginas para la API de Mindee."},
         
         # Table headers
         "Date": {"es": "Fecha"},
@@ -1082,11 +1163,11 @@ class BillTracker(QMainWindow):
     
     def setup_ocr(self):
         """Set up OCR functionality by loading Mindee API key."""
-        if not HAS_OCR:
-            return
-        
         # Try to load the API key
         MindeeHelper.load_api_key()
+        
+        # Make sure usage data is loaded even if API key isn't set
+        MindeeHelper.load_usage_data()
     
     def init_toolbar(self):
         """Initialize the toolbar with language options."""
@@ -1160,19 +1241,27 @@ class BillTracker(QMainWindow):
     def update_scan_button_state(self):
         """Update the scan button state based on OCR availability."""
         is_ocr_available = MindeeHelper.is_available()
-        self.scan_button.setEnabled(is_ocr_available)
+        has_pages_available = MindeeHelper.has_available_pages()
+        
+        # Button is enabled only if OCR is available AND we have pages left
+        self.scan_button.setEnabled(is_ocr_available and has_pages_available)
         
         if not is_ocr_available:
-            if not HAS_OCR:
-                # OCR libraries not installed
-                self.scan_button.setToolTip(UIHelper.translate(
-                    "OCR functionality requires Mindee API. Please install the Mindee package to use receipt scanning."
-                ))
-            else:
-                # OCR libraries installed but API key not set
-                self.scan_button.setToolTip(UIHelper.translate(
-                    "Mindee API key not set. Right-click to configure API key."
-                ))
+            # OCR libraries installed but API key not set
+            self.scan_button.setToolTip(UIHelper.translate(
+                "Mindee API key not set. Right-click to configure API key."
+            ))
+        elif not has_pages_available:
+            # No pages left this month
+            self.scan_button.setToolTip(UIHelper.translate(
+                "You have reached the monthly limit of 250 pages for the Mindee API."
+            ))
+        else:
+            # Show remaining page count
+            remaining = MindeeHelper.get_remaining_pages()
+            self.scan_button.setToolTip(UIHelper.translate(
+                f"Scan a receipt using OCR. {remaining} pages remaining this month."
+            ))
     
     def show_scan_context_menu(self, position):
         """Show a context menu for the scan button with OCR configuration options."""
@@ -1194,14 +1283,6 @@ class BillTracker(QMainWindow):
     
     def scan_receipt(self):
         """Scan a receipt using OCR to extract bill information."""
-        # Check if OCR is available
-        if not HAS_OCR:
-            QMessageBox.warning(
-                self, 
-                UIHelper.translate("OCR Not Available"), 
-                UIHelper.translate("OCR functionality requires Mindee API. Please install the Mindee package to use receipt scanning.")
-            )
-            return
         
         # Check if API key is set
         if not MindeeHelper.is_available():
@@ -1214,6 +1295,16 @@ class BillTracker(QMainWindow):
                 
             if result == QMessageBox.Yes:
                 self.show_mindee_config_dialog()
+            return
+        
+        # Check if we've reached the monthly limit
+        if not MindeeHelper.has_available_pages():
+            QMessageBox.warning(
+                self,
+                UIHelper.translate("API Limit Reached"),
+                UIHelper.translate("You have reached the monthly limit of 250 pages for the Mindee API. "
+                                  "The limit will reset at the beginning of next month.")
+            )
             return
         
         # Select an image first
@@ -1992,7 +2083,6 @@ class BillTracker(QMainWindow):
             
             QPushButton:hover {
                 background-color: #0069d9;
-                cursor: pointer;
             }
             
             QPushButton:pressed {
