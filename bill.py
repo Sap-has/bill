@@ -10,9 +10,9 @@ from PyQt5.QtWidgets import (
     QScrollArea, QDialog, QProgressBar, QCheckBox, QMenu
 )
 from PyQt5.QtPrintSupport import QPrinter, QPrintDialog, QPrintPreviewDialog, QPageSetupDialog
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtGui import QPixmap, QIcon
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize, QTimer
 import sqlite3
 import shutil
 
@@ -35,6 +35,8 @@ class MindeeHelper:
     usage_file = "mindee_usage.json"
     current_month_usage = 0
     usage_month = None
+    # Monthly limit for free tier
+    monthly_limit = 250
     
     @staticmethod
     def is_available():
@@ -57,42 +59,31 @@ class MindeeHelper:
     
     @staticmethod
     def load_usage_data():
-        """Load usage data from the JSON file.
+        """Load API usage data from the usage file.
         
         Returns:
-            bool: True if data was loaded successfully, False otherwise
+            tuple: (current_month_usage, usage_month)
         """
         try:
             if os.path.exists(MindeeHelper.usage_file):
                 with open(MindeeHelper.usage_file, 'r') as f:
                     data = json.load(f)
                     current_month = MindeeHelper.get_current_month()
-                    
-                    # If it's a new month, reset the counter
                     if data.get('month') == current_month:
-                        MindeeHelper.current_month_usage = data.get('usage', 0)
+                        return data.get('usage', 0), current_month
                     else:
-                        MindeeHelper.current_month_usage = 0
-                        
-                    MindeeHelper.usage_month = current_month
-                    return True
+                        # New month, reset usage
+                        return 0, current_month
             else:
-                # Initialize with zero usage for current month
-                MindeeHelper.current_month_usage = 0
-                MindeeHelper.usage_month = MindeeHelper.get_current_month()
-                MindeeHelper.save_usage_data()
-                return True
+                # No usage file exists yet
+                return 0, MindeeHelper.get_current_month()
         except Exception as e:
             print(f"Error loading usage data: {e}")
-            return False
+            return 0, MindeeHelper.get_current_month()
     
     @staticmethod
     def save_usage_data():
-        """Save current usage data to the JSON file.
-        
-        Returns:
-            bool: True if data was saved successfully, False otherwise
-        """
+        """Save API usage data to the usage file."""
         try:
             data = {
                 'month': MindeeHelper.usage_month,
@@ -100,65 +91,80 @@ class MindeeHelper:
             }
             with open(MindeeHelper.usage_file, 'w') as f:
                 json.dump(data, f)
-            return True
         except Exception as e:
             print(f"Error saving usage data: {e}")
-            return False
     
     @staticmethod
     def increment_usage():
-        """Increment the usage counter and save.
-        
-        Returns:
-            int: Current month's usage count after incrementing
-        """
-        # Make sure we're tracking the current month
-        current_month = MindeeHelper.get_current_month()
-        if MindeeHelper.usage_month != current_month:
-            MindeeHelper.current_month_usage = 0
-            MindeeHelper.usage_month = current_month
+        """Increment the API usage counter."""
+        try:
+            current_month = MindeeHelper.get_current_month()
+            if MindeeHelper.usage_month is None or MindeeHelper.usage_month != current_month:
+                # Initialize usage data for the current month
+                MindeeHelper.current_month_usage, MindeeHelper.usage_month = MindeeHelper.load_usage_data()
+                
+            # Increment usage
+            MindeeHelper.current_month_usage += 1
             
-        # Increment and save
-        MindeeHelper.current_month_usage += 1
-        MindeeHelper.save_usage_data()
-        return MindeeHelper.current_month_usage
+            # Save updated usage data
+            MindeeHelper.save_usage_data()
+        except Exception as e:
+            print(f"Error incrementing usage: {e}")
     
     @staticmethod
     def get_remaining_pages():
-        """Get the number of API calls remaining this month.
+        """Get the number of remaining pages for the current month.
         
         Returns:
-            int: Number of API calls remaining out of 250
+            int: Number of remaining pages.
         """
-        return max(0, 250 - MindeeHelper.current_month_usage)
+        current_month = MindeeHelper.get_current_month()
+        if MindeeHelper.usage_month is None or MindeeHelper.usage_month != current_month:
+            # Initialize usage data for the current month
+            MindeeHelper.current_month_usage, MindeeHelper.usage_month = MindeeHelper.load_usage_data()
+            
+        return max(0, MindeeHelper.monthly_limit - MindeeHelper.current_month_usage)
     
     @staticmethod
     def has_available_pages():
-        """Check if there are available API calls remaining this month.
+        """Check if there are available pages for the current month.
         
         Returns:
-            bool: True if there are API calls remaining, False otherwise
+            bool: True if there are pages available, False otherwise.
         """
-        return MindeeHelper.current_month_usage < 250
+        return MindeeHelper.get_remaining_pages() > 0
     
     @staticmethod
     def set_api_key(api_key):
         """Set the Mindee API key.
         
         Args:
-            api_key: The API key to use for Mindee.
+            api_key: The Mindee API key.
             
         Returns:
-            bool: True if API key was set successfully, False otherwise.
+            bool: True if successful, False otherwise.
         """
         try:
+            # Import Mindee Python package
+            global product
+            from mindee import Client, product
+            
+            # Initialize the Mindee client
+            client = Client(api_key)
+            
+            # Test the API key
             MindeeHelper.api_key = api_key
-            MindeeHelper.mindee_client = Client(api_key=api_key)
-            # Load usage data when setting API key
-            MindeeHelper.load_usage_data()
+            MindeeHelper.mindee_client = client
+            
+            # Load usage data
+            MindeeHelper.current_month_usage, MindeeHelper.usage_month = MindeeHelper.load_usage_data()
+            
             return True
+        except ImportError:
+            print("Error: Mindee Python package is not installed.")
+            return False
         except Exception as e:
-            print(f"Error setting Mindee API key: {e}")
+            print(f"Error setting API key: {e}")
             return False
     
     @staticmethod
@@ -213,6 +219,9 @@ class MindeeWorker(QThread):
                 "amount": ""
             }
             
+            # Import product if needed
+            from mindee import product
+            
             # Open the input file
             self.progress.emit(30)
             
@@ -256,7 +265,7 @@ class MindeeWorker(QThread):
         except Exception as e:
             print(f"Error in Mindee processing: {e}")
             # Emit empty result on error
-            self.finished.emit({"vendor": "", "date": "", "amount": ""})
+            self.finished.emit({"vendor": "", "date": "", "amount": "", "error": str(e)})
 
 class DateHelper:
     """Helper class for handling date operations."""
@@ -776,24 +785,33 @@ class DatabaseManager:
             
         return bills
     
-    def get_bill_images(self, start_date=None, end_date=None):
+    def get_bill_images(self, year=None, start_date=None, end_date=None):
         """Get bill images from the database with optional date filtering.
         
         Args:
+            year: The year to get bills from. If None, uses the in-memory database.
             start_date: Optional start date for filtering.
             end_date: Optional end date for filtering.
             
         Returns:
             list: List of tuples containing (date, image_filename).
         """
+        conn = self.get_db_connection(year)
+        
         if start_date and end_date:
             query = "SELECT date, image FROM bills WHERE image IS NOT NULL AND date BETWEEN ? AND ?"
-            cursor = self.conn.execute(query, (start_date, end_date))
+            cursor = conn.execute(query, (start_date, end_date))
         else:
             query = "SELECT date, image FROM bills WHERE image IS NOT NULL"
-            cursor = self.conn.execute(query)
+            cursor = conn.execute(query)
             
-        return cursor.fetchall()
+        results = cursor.fetchall()
+        
+        # Close the connection if it's not the in-memory database
+        if year is not None and year != "Present Database":
+            conn.close()
+            
+        return results
     
     def delete_bill(self, year, date, name, price):
         """Delete a bill from the database.
@@ -970,12 +988,12 @@ class OCRResultsDialog(QDialog):
         self.accept()
         
     def get_result(self):
-        """Get the dialog result.
-        
-        Returns:
-            dict: Dictionary of OCR results with acceptance status.
-        """
-        return self.result
+        """Get the result data."""
+        return {
+            "vendor": self.vendor_input.text(),
+            "date": self.date_input.text(),
+            "amount": self.amount_input.text()
+        }
 
 class MindeeAPIConfigDialog(QDialog):
     """Dialog for configuring Mindee API key."""
@@ -1120,20 +1138,20 @@ class BillTracker(QMainWindow):
         self.selected_image_path = None
         
         # Initialize pages
-        self.init_print_page()
+        self.init_dashboard_page()  # New dashboard page
         self.init_bill_page()
-        self.init_settings_page()
+        self.init_manage_bills_page()  # Combined print and delete functionality
+        self.init_photos_page()  # Initialize photos page
         self.init_data_page()
-        self.init_delete_page()
-        self.init_photos_page()
+        self.init_settings_page()
 
-        # Add pages to tab widget
+        # Add pages to tab widget with new structure
+        self.tab_widget.addTab(self.dashboard_page, UIHelper.translate("Dashboard"))
         self.tab_widget.addTab(self.bill_page, UIHelper.translate("Bill Entry"))
-        self.tab_widget.addTab(self.print_page, UIHelper.translate("Print Page"))
-        self.tab_widget.addTab(self.delete_page, UIHelper.translate("Delete Page"))
-        self.tab_widget.addTab(self.data_page, UIHelper.translate("Data"))
+        self.tab_widget.addTab(self.manage_bills_page, UIHelper.translate("Manage Bills"))
+        self.tab_widget.addTab(self.photos_page, UIHelper.translate("Photos"))  # Add photos tab
+        self.tab_widget.addTab(self.data_page, UIHelper.translate("Reports"))
         self.tab_widget.addTab(self.settings_page, UIHelper.translate("Settings"))
-        self.tab_widget.addTab(self.photos_page, UIHelper.translate("Photos"))
         
         # Load existing databases and bills
         self.load_existing_databases()
@@ -1148,6 +1166,9 @@ class BillTracker(QMainWindow):
         # Initialize the trie for name suggestions
         self.trie = Trie()
         self.load_names_into_trie()
+        
+        # Show notifications area
+        self.init_notification_system()
     
     def setup_ocr(self):
         """Set up OCR functionality by loading Mindee API key."""
@@ -1185,12 +1206,12 @@ class BillTracker(QMainWindow):
         self.setWindowTitle(UIHelper.translate('Bill Tracker'))
         
         # Update tab names
-        self.tab_widget.setTabText(0, UIHelper.translate("Bill Entry"))
-        self.tab_widget.setTabText(1, UIHelper.translate("Print Page"))
-        self.tab_widget.setTabText(2, UIHelper.translate("Delete Page"))
-        self.tab_widget.setTabText(3, UIHelper.translate("Data"))
-        self.tab_widget.setTabText(4, UIHelper.translate("Settings"))
-        self.tab_widget.setTabText(5, UIHelper.translate("Photos"))
+        self.tab_widget.setTabText(0, UIHelper.translate("Dashboard"))
+        self.tab_widget.setTabText(1, UIHelper.translate("Bill Entry"))
+        self.tab_widget.setTabText(2, UIHelper.translate("Manage Bills"))
+        self.tab_widget.setTabText(3, UIHelper.translate("Photos"))
+        self.tab_widget.setTabText(4, UIHelper.translate("Reports"))
+        self.tab_widget.setTabText(5, UIHelper.translate("Settings"))
         
         # Update all widgets with stored original text
         self.update_widget_translations(self)
@@ -1256,6 +1277,10 @@ class BillTracker(QMainWindow):
         configure_action = menu.addAction(UIHelper.translate("Configure Mindee API Key"))
         configure_action.triggered.connect(self.show_mindee_config_dialog)
         
+        # Add an action to just scan without OCR processing
+        scan_only_action = menu.addAction(UIHelper.translate("Just Scan (No OCR)"))
+        scan_only_action.triggered.connect(lambda: self.scan_receipt(ocr_enabled=False))
+        
         # Show the menu at the requested position
         menu.exec_(self.scan_button.mapToGlobal(position))
     
@@ -1266,11 +1291,14 @@ class BillTracker(QMainWindow):
             # Update the scan button state
             self.update_scan_button_state()
     
-    def scan_receipt(self):
-        """Scan a receipt using OCR to extract bill information."""
+    def scan_receipt(self, ocr_enabled=True):
+        """Scan a receipt using OCR to extract bill information or just save the image.
         
-        # Check if API key is set
-        if not MindeeHelper.is_available():
+        Args:
+            ocr_enabled: If True, use OCR to extract data. If False, just save the image.
+        """
+        # If OCR is enabled, check if API key is set
+        if ocr_enabled and not MindeeHelper.is_available():
             result = QMessageBox.question(
                 self, 
                 UIHelper.translate("API Key Not Set"), 
@@ -1282,15 +1310,21 @@ class BillTracker(QMainWindow):
                 self.show_mindee_config_dialog()
             return
         
-        # Check if we've reached the monthly limit
-        if not MindeeHelper.has_available_pages():
-            QMessageBox.warning(
+        # If OCR is enabled, check if we've reached the monthly limit
+        if ocr_enabled and not MindeeHelper.has_available_pages():
+            result = QMessageBox.question(
                 self,
                 UIHelper.translate("API Limit Reached"),
                 UIHelper.translate("You have reached the monthly limit of 250 pages for the Mindee API. "
-                                  "The limit will reset at the beginning of next month.")
+                                  "Would you like to scan the image without OCR processing?"),
+                QMessageBox.Yes | QMessageBox.No
             )
-            return
+            
+            if result == QMessageBox.Yes:
+                # Continue without OCR
+                ocr_enabled = False
+            else:
+                return
         
         # Select an image first
         options = QFileDialog.Options()
@@ -1308,6 +1342,11 @@ class BillTracker(QMainWindow):
         # Show image preview
         self.selected_image_path = file_path
         self.image_preview.setPixmap(QPixmap(file_path))
+        
+        # If OCR is disabled, just save the image and return
+        if not ocr_enabled:
+            self.show_notification(UIHelper.translate("Image scanned and saved (no OCR processing)."), "info")
+            return
         
         # Create and show progress dialog
         progress_dialog = QDialog(self)
@@ -1369,42 +1408,40 @@ class BillTracker(QMainWindow):
             self.image_preview.setPixmap(QPixmap(file_path))  # Show image preview
     
     def handle_ocr_results(self, ocr_results, progress_dialog):
-        """Handle the results from OCR processing.
-        
-        Args:
-            ocr_results: Dictionary of OCR results (vendor, date, amount)
-            progress_dialog: Progress dialog to close
-        """
+        """Handle the results from the OCR worker."""
         # Close the progress dialog
         progress_dialog.accept()
         
-        # Show confirmation dialog with results
-        dialog = OCRResultsDialog(self, ocr_results)
-        if dialog.exec_() == QDialog.Accepted:
-            result = dialog.get_result()
+        # Check if there was an error
+        if 'error' in ocr_results:
+            error_message = ocr_results['error']
+            if "API limit" in error_message or "monthly limit" in error_message:
+                # API limit reached - inform user but still save the image
+                self.show_notification(UIHelper.translate(
+                    "Mindee API limit reached. The image was saved but no data was extracted."), 
+                    "warning"
+                )
+            else:
+                # Other error
+                QMessageBox.warning(
+                    self, 
+                    UIHelper.translate("OCR Processing Error"), 
+                    UIHelper.translate("Failed to extract information from receipt. The image was saved.")
+                )
+        
+        # Show OCR results dialog if we have data to show
+        has_data = any(ocr_results.get(key, "") for key in ["vendor", "date", "amount"])
+        if has_data:
+            dialog = OCRResultsDialog(self, ocr_results)
+            if dialog.exec_() == QDialog.Accepted:
+                # Apply the OCR results to the form if user accepted them
+                results = dialog.get_result()
+                self.name_input.setText(results["vendor"])
+                self.date_input.setText(results["date"])
+                self.price_input.setText(results["amount"])
             
-            if result["accepted"]:
-                # Apply the values to the form
-                if result["date"]:
-                    self.date_input.setText(result["date"])
-                
-                if result["vendor"]:
-                    self.name_input.setText(result["vendor"])
-                
-                if result["amount"]:
-                    self.price_input.setText(result["amount"])
-                
-                # If edit is needed, focus on the first field that needs editing
-                if result.get("edit_needed", False):
-                    if not result["date"]:
-                        self.date_input.setFocus()
-                    elif not result["vendor"]:
-                        self.name_input.setFocus()
-                    elif not result["amount"]:
-                        self.price_input.setFocus()
-                    else:
-                        # Focus on vendor field for standard editing
-                        self.name_input.setFocus()
+        # Update scan button state (API usage may have changed)
+        self.update_scan_button_state()
     
     def show_autocomplete_suggestions(self):
         query = self.name_input.text()
@@ -1433,6 +1470,17 @@ class BillTracker(QMainWindow):
         self.photos_page = QWidget()
         self.photos_layout = QVBoxLayout()
         self.photos_page.setLayout(self.photos_layout)
+
+        # Section: Database Selection
+        self.photos_layout.addWidget(UIHelper.create_section_label("Select Year"))
+        
+        # Year selection dropdown
+        self.photos_year_selector = QComboBox()
+        self.photos_year_selector.addItem("Present Database")
+        self.photos_year_selector.currentIndexChanged.connect(self.load_all_photos)
+        self.photos_layout.addWidget(self.photos_year_selector)
+        
+        UIHelper.add_section_spacing(self.photos_layout)
 
         # Section: Filter Photos
         self.photos_layout.addWidget(UIHelper.create_section_label("Filter Photos by Date"))
@@ -1469,10 +1517,15 @@ class BillTracker(QMainWindow):
     
     def load_all_photos(self):
         """Load all photos from the database."""
+        if not hasattr(self, 'scroll_layout'):
+            return  # Exit early if layout not initialized
+            
         self.clear_layout(self.scroll_layout)  # Clear previous images
         
+        selected_year = self.photos_year_selector.currentText() if hasattr(self, 'photos_year_selector') else None
+        
         # Get all bill images
-        bill_images = self.db_manager.get_bill_images()
+        bill_images = self.db_manager.get_bill_images(selected_year)
         
         # Add images to the photos page
         for date, image_filename in bill_images:
@@ -1502,8 +1555,10 @@ class BillTracker(QMainWindow):
             
         self.clear_layout(self.scroll_layout)  # Clear existing images
         
+        selected_year = self.photos_year_selector.currentText() if hasattr(self, 'photos_year_selector') else None
+        
         # Get filtered bill images
-        bill_images = self.db_manager.get_bill_images(start_date, end_date)
+        bill_images = self.db_manager.get_bill_images(selected_year, start_date, end_date)
         
         # Add images to the photos page
         for date, image_filename in bill_images:
@@ -1564,22 +1619,43 @@ class BillTracker(QMainWindow):
         """Load existing year-specific databases into the selectors."""
         years = self.db_manager.get_existing_databases()
         
-        # Update the Main Page year selector
+        # Update all year selectors that exist in the application
         for year in years:
-            if year not in [self.year_selector.itemText(i) for i in range(self.year_selector.count())]:
-                self.year_selector.addItem(year)
+            # Update the Print Page year selector (main bills page)
+            if hasattr(self, 'year_selector'):
+                if year not in [self.year_selector.itemText(i) for i in range(self.year_selector.count())]:
+                    self.year_selector.addItem(year)
             
             # Update the Data Page year selector
-            if year not in [self.data_year_selector.itemText(i) for i in range(self.data_year_selector.count())]:
-                self.data_year_selector.addItem(year)
+            if hasattr(self, 'data_year_selector'):
+                if year not in [self.data_year_selector.itemText(i) for i in range(self.data_year_selector.count())]:
+                    self.data_year_selector.addItem(year)
             
             # Update the Delete Page year selector
-            if year not in [self.delete_year_selector.itemText(i) for i in range(self.delete_year_selector.count())]:
-                self.delete_year_selector.addItem(year)
+            if hasattr(self, 'delete_year_selector'):
+                if year not in [self.delete_year_selector.itemText(i) for i in range(self.delete_year_selector.count())]:
+                    self.delete_year_selector.addItem(year)
+                    
+            # Update the Manage Page year selector
+            if hasattr(self, 'manage_year_selector'):
+                if year not in [self.manage_year_selector.itemText(i) for i in range(self.manage_year_selector.count())]:
+                    self.manage_year_selector.addItem(year)
+                    
+            # Update the Photos Page year selector
+            if hasattr(self, 'photos_year_selector'):
+                if year not in [self.photos_year_selector.itemText(i) for i in range(self.photos_year_selector.count())]:
+                    self.photos_year_selector.addItem(year)
     
     def load_bills(self):
         """Load bills into the bill table based on the selected year."""
+        if not hasattr(self, 'bill_table'):
+            return  # Exit early if bill_table doesn't exist yet
+            
         self.bill_table.setRowCount(0)  # Clear the table
+        
+        if not hasattr(self, 'year_selector'):
+            return  # Exit early if year_selector doesn't exist yet
+            
         selected_year = self.year_selector.currentText()
         
         bills = self.db_manager.get_bills(selected_year)
@@ -1594,44 +1670,77 @@ class BillTracker(QMainWindow):
     def save_bill(self):
         """Save a bill to the database."""
         # Get date from input or calendar
-        if self.date_input.text():
-            date_text = self.date_input.text()
-            for date_format in DATE_FORMATS:
-                try:
-                    date = datetime.strptime(date_text, date_format).strftime(DATE_FORMAT)
-                    break
-                except ValueError:
-                    continue
-            else:
-                QMessageBox.warning(self, UIHelper.translate("Input Error"), 
-                                   UIHelper.translate("Invalid date format. Please use MM/dd/yyyy."))
-                return
-        else:
-            date = self.calendar.selectedDate().toString("MM/dd/yyyy")
-        
-        name = self.name_input.text()
-        price = self.price_input.text()
-
-        # Check if any field is empty
-        if not date or not name or not price:
-            QMessageBox.warning(self, UIHelper.translate("Input Error"), 
-                               UIHelper.translate("Please enter date, name, and price."))
+        date_text = self.date_input.text().strip()
+        if not date_text:
+            self.show_notification(UIHelper.translate("Please enter a date."), "warning")
+            self.date_input.setFocus()
+            return
+            
+        # Validate date format
+        date = None
+        for date_format in DATE_FORMATS:
+            try:
+                date = datetime.strptime(date_text, date_format).strftime(DATE_FORMAT)
+                break
+            except ValueError:
+                continue
+                
+        if not date:
+            self.show_notification(
+                UIHelper.translate("Invalid date format. Please use MM/dd/yyyy."), 
+                "warning"
+            )
+            self.date_input.setFocus()
             return
         
+        # Get and validate name
+        name = self.name_input.text().strip()
+        if not name:
+            self.show_notification(UIHelper.translate("Please enter a bill name."), "warning")
+            self.name_input.setFocus()
+            return
+        
+        # Get and validate price
+        price_text = self.price_input.text().strip()
+        if not price_text:
+            self.show_notification(UIHelper.translate("Please enter an amount."), "warning")
+            self.price_input.setFocus()
+            return
+            
+        try:
+            # Allow both "10.99" and "$10.99" formats
+            price_text = price_text.replace('$', '').strip()
+            price = float(price_text)
+            if price <= 0:
+                self.show_notification(UIHelper.translate("Amount must be greater than zero."), "warning")
+                self.price_input.setFocus()
+                return
+        except ValueError:
+            self.show_notification(UIHelper.translate("Invalid amount format. Please enter a number."), "warning")
+            self.price_input.setFocus()
+            return
+
         # Save the bill using the database manager
-        success = self.db_manager.save_bill(date, name, price, self.selected_image_path)
+        success = self.db_manager.save_bill(date, name, str(price), self.selected_image_path)
         
         if success:
             # Refresh the bill tables
             self.load_bills()
             self.load_present_bills()
             
+            # Update dashboard if it's available
+            if hasattr(self, 'update_dashboard_stats'):
+                self.update_dashboard_stats()
+                self.update_recent_bills_table()
+            
             # Update year selectors after saving
             self.load_existing_databases()
             
-            # Clear selected categories and update name input
+            # Clear selected categories and inputs
             self.selected_categories = []
-            
+            for category, button in self.category_buttons.items():
+                button.setChecked(False)
+                
             # Clear inputs after saving
             self.price_input.clear()
             self.name_input.clear()
@@ -1640,9 +1749,24 @@ class BillTracker(QMainWindow):
             # Clear selected image
             self.selected_image_path = None
             self.image_preview.clear()
+            
+            # Show success notification
+            self.show_notification(UIHelper.translate("Bill saved successfully!"), "success")
+            
+            # Also save the bill name to the trie for future autocomplete
+            if name not in self.trie.words:
+                self.trie.insert(name)
+                # Update the unique_names.json file
+                try:
+                    with open('unique_names.json', 'w') as file:
+                        json.dump(self.trie.words, file)
+                except Exception as e:
+                    print(f"Error saving unique names: {e}")
         else:
-            QMessageBox.critical(self, UIHelper.translate("Error"), 
-                                UIHelper.translate("Failed to save bill. Please try again."))
+            self.show_notification(
+                UIHelper.translate("Failed to save bill. Please try again."), 
+                "error"
+            )
     
     def create_table_in_db(self, conn):
         query = """
@@ -1782,6 +1906,11 @@ class BillTracker(QMainWindow):
     
     def render_filtered_table_to_printer(self, printer):
         from PyQt5.QtGui import QPainter, QFont
+        
+        if not hasattr(self, 'bill_table'):
+            # Show an error message if the bill_table doesn't exist
+            QMessageBox.critical(self, "Print Error", "The bill table is not available for printing.")
+            return
 
         # Create a painter to handle rendering
         painter = QPainter(printer)
@@ -1818,6 +1947,12 @@ class BillTracker(QMainWindow):
     
     def filter_by_date_range(self):
         """Filter the bill table by date range."""
+        if not hasattr(self, 'bill_table'):
+            return  # Exit early if bill_table doesn't exist yet
+            
+        if not hasattr(self, 'year_selector'):
+            return  # Exit early if year_selector doesn't exist yet
+            
         start_date, end_date = DateHelper.parse_date_range(
             self.start_date_input.text(), 
             self.end_date_input.text()
@@ -2014,55 +2149,111 @@ class BillTracker(QMainWindow):
         """Apply stylesheet to the application for consistent styling."""
         self.setStyleSheet("""
             QWidget {
-                font-size: 12px;
-                font-family: Arial, sans-serif;
+                font-size: 13px;
+                font-family: 'Segoe UI', Arial, sans-serif;
             }
             
             QMainWindow {
-                background-color: #f8f9fa;
+                background-color: #f5f7fa;
             }
             
+            /* Tab styling */
             QTabWidget::pane {
-                border: 1px solid #ddd;
-                background-color: white;
-                border-radius: 4px;
+                border: none;
+                background-color: transparent;
+                border-radius: 0;
             }
             
             QTabBar::tab {
-                background-color: #e9ecef;
-                color: #495057;
-                padding: 8px 16px;
+                background-color: transparent;
+                color: #718096;
+                padding: 10px 18px;
                 margin-right: 2px;
-                border-top-left-radius: 4px;
-                border-top-right-radius: 4px;
-                border: 1px solid #ddd;
-                border-bottom: none;
+                margin-bottom: -1px;
+                font-weight: bold;
+                border-bottom: 3px solid transparent;
             }
             
             QTabBar::tab:selected {
-                background-color: white;
-                border-bottom-color: white;
-                color: #007bff;
-                font-weight: bold;
+                color: #3b82f6;
+                border-bottom: 3px solid #3b82f6;
             }
             
-            QLineEdit {
+            QTabBar::tab:hover:!selected {
+                color: #4b5563;
+                border-bottom: 3px solid #cbd5e1;
+            }
+            
+            /* Card styling */
+            #card {
+                background-color: white;
+                border-radius: 8px;
+                border: 1px solid #e2e8f0;
+                padding: 10px;
+            }
+            
+            #photo-card {
+                background-color: white;
+                border-radius: 8px;
+                border: 1px solid #e2e8f0;
                 padding: 8px;
-                border: 1px solid #ced4da;
+                margin: 5px;
+            }
+            
+            #stat-card {
+                background-color: white;
+                border-radius: 8px;
+                border: 1px solid #e2e8f0;
+                padding: 15px;
+                margin: 5px;
+                min-height: 80px;
+            }
+            
+            /* Form elements */
+            QLineEdit {
+                padding: 8px 10px;
+                border: 1px solid #cbd5e1;
                 border-radius: 4px;
                 background-color: white;
-                selection-background-color: #007bff;
+                selection-background-color: #3b82f6;
+                min-height: 25px;
             }
             
             QLineEdit:focus {
-                border: 1px solid #80bdff;
+                border: 1px solid #3b82f6;
                 outline: 0;
-                /* Remove box-shadow as it's not supported in PyQt CSS */
             }
             
+            #form-group {
+                background-color: transparent;
+                margin-bottom: 10px;
+                max-width: 400px;
+            }
+            
+            #form-label {
+                color: #4b5563;
+                font-weight: bold;
+                margin-bottom: 5px;
+            }
+            
+            /* Dashboard stats */
+            #stat-number {
+                font-size: 24px;
+                font-weight: bold;
+                color: #3b82f6;
+            }
+            
+            #card-title {
+                font-size: 18px;
+                font-weight: bold;
+                color: #1e293b;
+                margin-bottom: 15px;
+            }
+            
+            /* Buttons styling */
             QPushButton {
-                background-color: #007bff;
-                color: white;
+                background-color: #e2e8f0;
+                color: #4b5563;
                 border: none;
                 border-radius: 4px;
                 padding: 8px 16px;
@@ -2071,102 +2262,262 @@ class BillTracker(QMainWindow):
             }
             
             QPushButton:hover {
-                background-color: #0069d9;
+                background-color: #cbd5e1;
+                color: #1e293b;
             }
             
             QPushButton:pressed {
-                background-color: #0062cc;
+                background-color: #94a3b8;
             }
             
-            QTableWidget {
-                background-color: white;
-                alternate-background-color: #f8f9fa;
-                border: 1px solid #ddd;
-                border-radius: 4px;
-                gridline-color: #ddd;
-            }
-            
-            QTableWidget::item {
-                padding: 4px;
-            }
-            
-            QTableWidget::item:selected {
-                background-color: #007bff;
+            #primary-action {
+                background-color: #3b82f6;
                 color: white;
             }
             
+            #primary-action:hover {
+                background-color: #2563eb;
+                color: white;
+            }
+            
+            #primary-action:pressed {
+                background-color: #1d4ed8;
+            }
+            
+            #danger-button {
+                background-color: #f87171;
+                color: white;
+            }
+            
+            #danger-button:hover {
+                background-color: #ef4444;
+            }
+            
+            #text-button {
+                background-color: transparent;
+                color: #3b82f6;
+                font-weight: normal;
+                border: none;
+                text-decoration: underline;
+                padding: 0;
+                min-height: 20px;
+            }
+            
+            #text-button:hover {
+                color: #2563eb;
+                background-color: transparent;
+            }
+            
+            /* Category chips */
+            #category-chip {
+                background-color: #e2e8f0;
+                color: #4b5563;
+                border-radius: 15px;
+                padding: 5px 10px;
+                font-size: 12px;
+                text-align: center;
+                min-width: 80px;
+            }
+            
+            #category-chip:checked {
+                background-color: #3b82f6;
+                color: white;
+            }
+            
+            /* Photo preview */
+            #photo-preview {
+                background-color: #f1f5f9;
+                border: 1px dashed #cbd5e1;
+                border-radius: 4px;
+            }
+            
+            /* Currency symbol */
+            #currency-symbol {
+                color: #64748b;
+                font-weight: bold;
+                margin-right: 0;
+                padding-top: 8px;
+            }
+            
+            /* Table styling */
+            QTableWidget {
+                background-color: white;
+                alternate-background-color: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 4px;
+                gridline-color: #e2e8f0;
+            }
+            
+            QTableWidget::item {
+                padding: 5px;
+                border-bottom: 1px solid #f1f5f9;
+            }
+            
+            QTableWidget::item:selected {
+                background-color: #bfdbfe;
+                color: #1e293b;
+            }
+            
             QHeaderView::section {
-                background-color: #e9ecef;
-                color: #495057;
+                background-color: #f1f5f9;
+                color: #475569;
                 padding: 8px;
-                border: 1px solid #ddd;
+                border: none;
+                border-bottom: 1px solid #cbd5e1;
                 font-weight: bold;
             }
             
+            /* Calendar widget */
             QCalendarWidget {
                 background-color: white;
-                border: 1px solid #ddd;
+                border: 1px solid #cbd5e1;
+                border-radius: 4px;
             }
             
             QCalendarWidget QToolButton {
-                background-color: #e9ecef;
-                color: #495057;
-                border: 1px solid #ddd;
+                background-color: #f1f5f9;
+                color: #475569;
+                border: 1px solid #cbd5e1;
                 border-radius: 4px;
                 padding: 4px;
             }
             
             QCalendarWidget QMenu {
                 background-color: white;
-                border: 1px solid #ddd;
+                border: 1px solid #cbd5e1;
+                border-radius: 4px;
             }
             
             QCalendarWidget QAbstractItemView:enabled {
                 background-color: white;
-                color: #212529;
-                selection-background-color: #007bff;
+                color: #1e293b;
+                selection-background-color: #3b82f6;
                 selection-color: white;
             }
             
+            /* Dropdown styling */
             QComboBox {
-                border: 1px solid #ced4da;
+                border: 1px solid #cbd5e1;
                 border-radius: 4px;
                 padding: 8px;
                 background-color: white;
+                min-height: 25px;
             }
             
             QComboBox::drop-down {
                 subcontrol-origin: padding;
                 subcontrol-position: top right;
                 width: 20px;
-                border-left: 1px solid #ced4da;
+                border-left: 1px solid #cbd5e1;
             }
             
             QComboBox QAbstractItemView {
-                border: 1px solid #ced4da;
-                selection-background-color: #007bff;
-            }
-            
-            QScrollArea {
-                border: 1px solid #ddd;
+                border: 1px solid #cbd5e1;
                 border-radius: 4px;
-                background-color: white;
+                selection-background-color: #3b82f6;
             }
             
+            /* Scrollbars */
+            QScrollBar:vertical {
+                border: none;
+                background: #f1f5f9;
+                width: 8px;
+                margin: 0px 0px 0px 0px;
+            }
+            
+            QScrollBar::handle:vertical {
+                background: #cbd5e1;
+                min-height: 30px;
+                border-radius: 4px;
+            }
+            
+            QScrollBar::handle:vertical:hover {
+                background: #94a3b8;
+            }
+            
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            
+            QScrollBar:horizontal {
+                border: none;
+                background: #f1f5f9;
+                height: 8px;
+                margin: 0px 0px 0px 0px;
+            }
+            
+            QScrollBar::handle:horizontal {
+                background: #cbd5e1;
+                min-width: 30px;
+                border-radius: 4px;
+            }
+            
+            QScrollBar::handle:horizontal:hover {
+                background: #94a3b8;
+            }
+            
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0px;
+            }
+            
+            /* List widget */
             QListWidget {
-                border: 1px solid #ddd;
+                border: 1px solid #cbd5e1;
                 border-radius: 4px;
                 background-color: white;
-                alternate-background-color: #f8f9fa;
+                selection-background-color: #bfdbfe;
+                selection-color: #1e293b;
+                outline: none;
             }
             
             QListWidget::item {
-                padding: 4px;
+                padding: 5px;
+                border-bottom: 1px solid #f1f5f9;
             }
             
             QListWidget::item:selected {
-                background-color: #007bff;
-                color: white;
+                background-color: #bfdbfe;
+                color: #1e293b;
+            }
+            
+            QListWidget::item:hover {
+                background-color: #f1f5f9;
+            }
+            
+            /* Notification area */
+            #notification-area {
+                font-weight: bold;
+                padding: 10px;
+                margin: 0px;
+            }
+            
+            /* Checkbox styling */
+            QCheckBox {
+                spacing: 5px;
+            }
+            
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border: 1px solid #cbd5e1;
+                border-radius: 3px;
+                background-color: white;
+            }
+            
+            QCheckBox::indicator:checked {
+                background-color: #3b82f6;
+                border-color: #3b82f6;
+            }
+            
+            /* Mobile responsiveness - base styles */
+            @media (max-width: 800px) {
+                QLineEdit, QComboBox, QPushButton {
+                    min-height: 40px;  /* Larger touch targets */
+                }
+                
+                QTableWidget::item {
+                    padding: 8px;  /* More spacing for touch */
+                }
             }
         """)
 
@@ -2195,10 +2546,15 @@ class BillTracker(QMainWindow):
 
     def load_names_into_trie(self):
         # Load names from unique_names.json and insert them into the trie
-        with open('unique_names.json', 'r') as file:
-            names = json.load(file)
-        for name in names:
-            self.trie.insert(name)
+        try:
+            with open('unique_names.json', 'r') as file:
+                names = json.load(file)
+            for name in names:
+                self.trie.insert(name)
+        except FileNotFoundError:
+            # Create the file if it doesn't exist
+            with open('unique_names.json', 'w') as file:
+                json.dump([], file)
 
     def init_print_page(self):
         """Initialize the Print Page tab with filter and display options."""
@@ -2279,105 +2635,1000 @@ class BillTracker(QMainWindow):
     def init_bill_page(self):
         """Initialize the Bill Entry tab with form and category selection."""
         self.bill_page = QWidget()
-        self.bill_layout = QVBoxLayout()
-        self.bill_page.setLayout(self.bill_layout)
-
-        # Section: Date Selection
-        self.bill_layout.addWidget(UIHelper.create_section_label("Select Date"))
+        main_layout = QVBoxLayout()
+        main_layout.setSpacing(20)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        self.bill_page.setLayout(main_layout)
         
-        # Calendar
-        self.calendar = QCalendarWidget()
-        self.calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
-        self.bill_layout.addWidget(self.calendar)
-
-        # Manual date input
+        # Bill form card
+        form_card = QWidget()
+        form_card.setObjectName("card")
+        form_layout = QVBoxLayout()
+        form_card.setLayout(form_layout)
+        
+        # Card title
+        form_title = QLabel(UIHelper.translate("New Bill"))
+        form_title.setObjectName("card-title")
+        form_title.setProperty("original_text", "New Bill")
+        form_layout.addWidget(form_title)
+        
+        # Form groups
+        form_groups_layout = QHBoxLayout()
+        
+        # Left column - Date and details
+        left_column = QVBoxLayout()
+        
+        # Date selection group
+        date_group = QWidget()
+        date_group.setObjectName("form-group")
+        date_layout = QVBoxLayout()
+        date_group.setLayout(date_layout)
+        
+        date_label = QLabel(UIHelper.translate("Date"))
+        date_label.setObjectName("form-label")
+        date_label.setProperty("original_text", "Date")
+        date_layout.addWidget(date_label)
+        
+        # Date picker with calendar popup button
+        date_picker_layout = QHBoxLayout()
+        
         self.date_input = UIHelper.create_date_input()
-        self.bill_layout.addWidget(self.date_input)
+        date_picker_layout.addWidget(self.date_input)
         
-        UIHelper.add_section_spacing(self.bill_layout)
+        calendar_btn = QPushButton()
+        calendar_btn.setIcon(QIcon.fromTheme("x-office-calendar", QIcon()))
+        calendar_btn.setIconSize(QSize(16, 16))
+        calendar_btn.setMaximumWidth(40)
+        calendar_btn.clicked.connect(self.show_calendar_dialog)
+        date_picker_layout.addWidget(calendar_btn)
         
-        # Section: Bill Details
-        self.bill_layout.addWidget(UIHelper.create_section_label("Bill Details"))
-
-        # Name input
+        date_layout.addLayout(date_picker_layout)
+        left_column.addWidget(date_group)
+        
+        # Bill name group
+        name_group = QWidget()
+        name_group.setObjectName("form-group")
+        name_layout = QVBoxLayout()
+        name_group.setLayout(name_layout)
+        
+        name_label = QLabel(UIHelper.translate("Bill Name"))
+        name_label.setObjectName("form-label")
+        name_label.setProperty("original_text", "Bill Name")
+        name_layout.addWidget(name_label)
+        
         self.name_input = UIHelper.create_input_field("Enter bill name")
         self.name_input.textChanged.connect(self.show_autocomplete_suggestions)
-        self.bill_layout.addWidget(self.name_input)
-
-        # Autocomplete suggestions list
+        name_layout.addWidget(self.name_input)
+        
+        # Show suggestions only when typing
         self.suggestions_list = QListWidget()
-        self.suggestions_list.setFixedHeight(150)
+        self.suggestions_list.setFixedHeight(0)  # Hidden initially
+        self.suggestions_list.setFrameShape(QListWidget.NoFrame)
         self.suggestions_list.itemClicked.connect(self.select_suggestion)
-        self.bill_layout.addWidget(self.suggestions_list)
-
-        # Amount input
-        self.price_input = UIHelper.create_input_field("Enter price")
-        self.bill_layout.addWidget(self.price_input)
+        name_layout.addWidget(self.suggestions_list)
         
-        UIHelper.add_section_spacing(self.bill_layout)
+        left_column.addWidget(name_group)
         
-        # Section: Categories
-        self.bill_layout.addWidget(UIHelper.create_section_label("Select Categories"))
+        # Amount group
+        amount_group = QWidget()
+        amount_group.setObjectName("form-group")
+        amount_layout = QVBoxLayout()
+        amount_group.setLayout(amount_layout)
         
-        # Category buttons
+        amount_label = QLabel(UIHelper.translate("Amount"))
+        amount_label.setObjectName("form-label")
+        amount_label.setProperty("original_text", "Amount")
+        amount_layout.addWidget(amount_label)
+        
+        amount_input_layout = QHBoxLayout()
+        
+        # Dollar sign prefix
+        dollar_label = QLabel("$")
+        dollar_label.setObjectName("currency-symbol")
+        amount_input_layout.addWidget(dollar_label)
+        
+        self.price_input = UIHelper.create_input_field("0.00")
+        amount_input_layout.addWidget(self.price_input)
+        
+        amount_layout.addLayout(amount_input_layout)
+        left_column.addWidget(amount_group)
+        
+        # Add to form groups
+        form_groups_layout.addLayout(left_column)
+        
+        # Right column - Categories and Photos
+        right_column = QVBoxLayout()
+        
+        # Categories group
+        categories_group = QWidget()
+        categories_group.setObjectName("form-group")
+        categories_layout = QVBoxLayout()
+        categories_group.setLayout(categories_layout)
+        
+        categories_label = QLabel(UIHelper.translate("Categories"))
+        categories_label.setObjectName("form-label")
+        categories_label.setProperty("original_text", "Categories")
+        categories_layout.addWidget(categories_label)
+        
+        # Category chips/tags in a flowing layout
+        self.category_flow_widget = QWidget()
+        self.category_flow_layout = QGridLayout()
+        self.category_flow_layout.setHorizontalSpacing(10)
+        self.category_flow_layout.setVerticalSpacing(10)
+        self.category_flow_widget.setLayout(self.category_flow_layout)
+        categories_layout.addWidget(self.category_flow_widget)
+        
+        # Create category chips
         self.category_buttons = {}
         self.categories = self.predefined_order
-        self.category_layout = QGridLayout()
         
         for i, category in enumerate(self.categories):
-            # Create a button without translation marking
-            button = QPushButton(category)
-            button.setFixedHeight(40)
-            button.clicked.connect(partial(self.add_category, category))
+            # Create a togglable chip button
+            chip = QPushButton(category)
+            chip.setObjectName("category-chip")
+            chip.setCheckable(True)
+            chip.setMinimumHeight(30)  # More touch-friendly
+            chip.toggled.connect(lambda checked, cat=category: self.toggle_category(cat, checked))
             
-            self.category_layout.addWidget(button, i // 5, i % 5)
-            self.category_buttons[category] = button
-            
-        self.bill_layout.addLayout(self.category_layout)
+            self.category_flow_layout.addWidget(chip, i // 4, i % 4)  # 4 columns
+            self.category_buttons[category] = chip
         
-        UIHelper.add_section_spacing(self.bill_layout)
+        right_column.addWidget(categories_group)
         
-        # Section: Add Photo
-        self.bill_layout.addWidget(UIHelper.create_section_label("Bill Photo"))
-
-        # Image buttons layout
-        image_buttons_layout = QHBoxLayout()
+        # Photo group
+        photo_group = QWidget()
+        photo_group.setObjectName("form-group")
+        photo_layout = QVBoxLayout()
+        photo_group.setLayout(photo_layout)
         
-        # Image selection button
-        self.image_button = UIHelper.create_button("Add Photo", self.select_photo)
-        image_buttons_layout.addWidget(self.image_button)
+        photo_label = QLabel(UIHelper.translate("Receipt Photo"))
+        photo_label.setObjectName("form-label")
+        photo_label.setProperty("original_text", "Receipt Photo")
+        photo_layout.addWidget(photo_label)
         
-        # OCR scan button (if OCR is available)
-        self.scan_button = UIHelper.create_button("Scan Receipt", self.scan_receipt)
+        # Photo preview and buttons
+        preview_layout = QHBoxLayout()
+        
+        # Image preview
+        preview_container = QWidget()
+        preview_container.setObjectName("photo-preview")
+        preview_container.setMinimumSize(150, 150)
+        preview_container.setMaximumSize(150, 150)
+        
+        preview_container_layout = QVBoxLayout()
+        preview_container.setLayout(preview_container_layout)
+        
+        self.image_preview = QLabel()
+        self.image_preview.setAlignment(Qt.AlignCenter)
+        self.image_preview.setScaledContents(True)
+        preview_container_layout.addWidget(self.image_preview)
+        
+        preview_layout.addWidget(preview_container)
+        
+        # Photo actions
+        photo_actions = QVBoxLayout()
+        
+        # Photo buttons with icons
+        self.image_button = QPushButton(UIHelper.translate("  Add Photo"))
+        self.image_button.setProperty("original_text", "  Add Photo")
+        self.image_button.setIcon(QIcon.fromTheme("insert-image", QIcon()))
+        self.image_button.setIconSize(QSize(16, 16))
+        self.image_button.clicked.connect(self.select_photo)
+        photo_actions.addWidget(self.image_button)
+        
+        self.scan_button = QPushButton(UIHelper.translate("  Scan Receipt"))
+        self.scan_button.setProperty("original_text", "  Scan Receipt")
+        self.scan_button.setIcon(QIcon.fromTheme("scanner", QIcon()))
+        self.scan_button.setIconSize(QSize(16, 16))
         self.scan_button.setContextMenuPolicy(Qt.CustomContextMenu)
         self.scan_button.customContextMenuRequested.connect(self.show_scan_context_menu)
-        image_buttons_layout.addWidget(self.scan_button)
+        self.scan_button.clicked.connect(self.scan_receipt)
+        photo_actions.addWidget(self.scan_button)
         
-        # Check OCR availability and update the scan button state
+        # Check OCR availability and update button state
         self.update_scan_button_state()
         
-        self.bill_layout.addLayout(image_buttons_layout)
-
-        # Image preview
-        self.image_preview = QLabel()
-        self.image_preview.setFixedSize(200, 200)
-        self.image_preview.setScaledContents(True)
-        self.bill_layout.addWidget(self.image_preview)
+        # Add a clear photo button
+        self.clear_photo_btn = QPushButton(UIHelper.translate("  Clear Photo"))
+        self.clear_photo_btn.setProperty("original_text", "  Clear Photo")
+        self.clear_photo_btn.setIcon(QIcon.fromTheme("edit-clear", QIcon()))
+        self.clear_photo_btn.setIconSize(QSize(16, 16))
+        self.clear_photo_btn.clicked.connect(self.clear_photo)
+        photo_actions.addWidget(self.clear_photo_btn)
         
-        UIHelper.add_section_spacing(self.bill_layout)
+        preview_layout.addLayout(photo_actions)
+        photo_layout.addLayout(preview_layout)
         
-        # Section: Save
-        self.save_button = UIHelper.create_button("Save Bill", self.save_bill)
-        self.bill_layout.addWidget(self.save_button)
+        right_column.addWidget(photo_group)
         
-        UIHelper.add_section_spacing(self.bill_layout)
+        # Add to form groups
+        form_groups_layout.addLayout(right_column)
         
-        # Section: Recent Bills
-        self.bill_layout.addWidget(UIHelper.create_section_label("Recent Bills"))
+        form_layout.addLayout(form_groups_layout)
         
-        # Table to display bills (only present database)
+        # Save button - prominent at the bottom
+        save_btn_layout = QHBoxLayout()
+        save_btn_layout.addStretch()
+        
+        self.save_button = QPushButton(UIHelper.translate("  Save Bill"))
+        self.save_button.setProperty("original_text", "  Save Bill")
+        self.save_button.setIcon(QIcon.fromTheme("document-save", QIcon()))
+        self.save_button.setIconSize(QSize(20, 20))
+        self.save_button.setMinimumSize(120, 40)  # Large, touch-friendly button
+        self.save_button.setObjectName("primary-action")
+        self.save_button.clicked.connect(self.save_bill)
+        save_btn_layout.addWidget(self.save_button)
+        
+        form_layout.addLayout(save_btn_layout)
+        
+        main_layout.addWidget(form_card)
+        
+        # Recent bills card
+        recent_card = QWidget()
+        recent_card.setObjectName("card")
+        recent_layout = QVBoxLayout()
+        recent_card.setLayout(recent_layout)
+        
+        recent_title = QLabel(UIHelper.translate("Recent Bills"))
+        recent_title.setObjectName("card-title")
+        recent_title.setProperty("original_text", "Recent Bills")
+        recent_layout.addWidget(recent_title)
+        
+        # Recent bills table
         self.present_bill_table = UIHelper.create_table(3, ["Date", "Name", "Price"])
-        self.bill_layout.addWidget(self.present_bill_table)
+        self.present_bill_table.setMaximumHeight(200)
+        recent_layout.addWidget(self.present_bill_table)
+        
+        main_layout.addWidget(recent_card)
+    
+    def show_autocomplete_suggestions(self):
+        """Show autocomplete suggestions for bill names."""
+        query = self.name_input.text()
+        
+        if len(query) < 2:
+            self.suggestions_list.clear()
+            self.suggestions_list.setFixedHeight(0)  # Hide when not needed
+            return
+            
+        suggestions = self.trie.get_suggestions(query)
+        
+        if suggestions:
+            self.suggestions_list.clear()
+            self.suggestions_list.addItems(suggestions)
+            # Adjust height based on number of suggestions (up to 5 visible)
+            item_height = 25
+            suggestion_count = min(5, len(suggestions))
+            self.suggestions_list.setFixedHeight(suggestion_count * item_height)
+        else:
+            self.suggestions_list.clear()
+            self.suggestions_list.setFixedHeight(0)  # Hide when no suggestions
+    
+    def select_suggestion(self, item):
+        """Select a suggestion from the autocomplete list."""
+        self.name_input.setText(item.text())
+        self.suggestions_list.clear()
+        self.suggestions_list.setFixedHeight(0)  # Hide after selection
+    
+    def toggle_category(self, category, checked):
+        """Toggle a category on or off."""
+        if checked and category not in self.selected_categories:
+            self.selected_categories.append(category)
+        elif not checked and category in self.selected_categories:
+            self.selected_categories.remove(category)
+            
+        self.update_name_input()
+    
+    def show_calendar_dialog(self):
+        """Show a dialog with calendar widget for date selection."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle(UIHelper.translate("Select Date"))
+        dialog.setFixedSize(300, 300)
+        
+        layout = QVBoxLayout()
+        dialog.setLayout(layout)
+        
+        calendar = QCalendarWidget()
+        calendar.setVerticalHeaderFormat(QCalendarWidget.NoVerticalHeader)
+        layout.addWidget(calendar)
+        
+        # Button to accept selection
+        select_btn = QPushButton(UIHelper.translate("Select"))
+        select_btn.clicked.connect(lambda: (self.date_input.setText(calendar.selectedDate().toString("MM/dd/yyyy")), dialog.accept()))
+        layout.addWidget(select_btn)
+        
+        dialog.exec_()
+    
+    def clear_photo(self):
+        """Clear the selected photo."""
+        self.selected_image_path = None
+        self.image_preview.clear()
+        self.show_notification(UIHelper.translate("Photo cleared"), "info")
+
+    def init_dashboard_page(self):
+        """Initialize the Dashboard page with summary widgets and quick actions."""
+        self.dashboard_page = QWidget()
+        main_layout = QVBoxLayout()
+        self.dashboard_page.setLayout(main_layout)
+        
+        # Welcome section with search
+        welcome_card = QWidget()
+        welcome_card.setObjectName("card")
+        welcome_layout = QVBoxLayout()
+        welcome_card.setLayout(welcome_layout)
+        
+        # Welcome header with search
+        header_layout = QHBoxLayout()
+        welcome_label = QLabel(UIHelper.translate("Welcome to Bill Tracker"))
+        welcome_label.setObjectName("card-title")
+        header_layout.addWidget(welcome_label)
+        
+        # Global search box
+        self.global_search = QLineEdit()
+        self.global_search.setPlaceholderText(UIHelper.translate("Search all bills..."))
+        self.global_search.setProperty("original_placeholder", "Search all bills...")
+        self.global_search.setMinimumWidth(200)
+        self.global_search.textChanged.connect(self.perform_global_search)
+        header_layout.addWidget(self.global_search)
+        
+        welcome_layout.addLayout(header_layout)
+        
+        # Quick stats summary
+        stats_layout = QHBoxLayout()
+        
+        # Bills this month card
+        bills_month_widget = QWidget()
+        bills_month_widget.setObjectName("stat-card")
+        bills_month_layout = QVBoxLayout()
+        bills_month_widget.setLayout(bills_month_layout)
+        bills_month_count = QLabel("0")
+        bills_month_count.setObjectName("stat-number")
+        bills_month_layout.addWidget(bills_month_count)
+        bills_month_label = QLabel(UIHelper.translate("Bills This Month"))
+        bills_month_label.setProperty("original_text", "Bills This Month")
+        bills_month_layout.addWidget(bills_month_label)
+        stats_layout.addWidget(bills_month_widget)
+        
+        # Total spent this month card
+        total_month_widget = QWidget()
+        total_month_widget.setObjectName("stat-card")
+        total_month_layout = QVBoxLayout()
+        total_month_widget.setLayout(total_month_layout)
+        total_month_amount = QLabel("$0.00")
+        total_month_amount.setObjectName("stat-number")
+        total_month_layout.addWidget(total_month_amount)
+        total_month_label = QLabel(UIHelper.translate("Total This Month"))
+        total_month_label.setProperty("original_text", "Total This Month")
+        total_month_layout.addWidget(total_month_label)
+        stats_layout.addWidget(total_month_widget)
+        
+        # Top category this month
+        top_category_widget = QWidget()
+        top_category_widget.setObjectName("stat-card")
+        top_category_layout = QVBoxLayout()
+        top_category_widget.setLayout(top_category_layout)
+        top_category_name = QLabel("--")
+        top_category_name.setObjectName("stat-number")
+        top_category_layout.addWidget(top_category_name)
+        top_category_label = QLabel(UIHelper.translate("Top Category"))
+        top_category_label.setProperty("original_text", "Top Category")
+        top_category_layout.addWidget(top_category_label)
+        stats_layout.addWidget(top_category_widget)
+        
+        welcome_layout.addLayout(stats_layout)
+        main_layout.addWidget(welcome_card)
+        
+        # Quick Actions section
+        actions_card = QWidget()
+        actions_card.setObjectName("card")
+        actions_layout = QVBoxLayout()
+        actions_card.setLayout(actions_layout)
+        
+        actions_title = QLabel(UIHelper.translate("Quick Actions"))
+        actions_title.setObjectName("card-title")
+        actions_title.setProperty("original_text", "Quick Actions")
+        actions_layout.addWidget(actions_title)
+        
+        # Action buttons
+        action_buttons_layout = QHBoxLayout()
+        
+        # Add New Bill button with icon
+        add_bill_btn = QPushButton("  " + UIHelper.translate("Add New Bill"))
+        add_bill_btn.setProperty("original_text", "  Add New Bill")
+        add_bill_btn.setIcon(QIcon.fromTheme("list-add", QIcon()))
+        add_bill_btn.setIconSize(QSize(24, 24))
+        add_bill_btn.setObjectName("primary-action")
+        add_bill_btn.clicked.connect(lambda: self.tab_widget.setCurrentIndex(1))  # Go to Bill Entry tab
+        action_buttons_layout.addWidget(add_bill_btn)
+        
+        # Print Reports button with icon
+        print_btn = QPushButton("  " + UIHelper.translate("Print Reports"))
+        print_btn.setProperty("original_text", "  Print Reports")
+        print_btn.setIcon(QIcon.fromTheme("document-print", QIcon()))
+        print_btn.setIconSize(QSize(24, 24))
+        print_btn.clicked.connect(self.print_bills)
+        action_buttons_layout.addWidget(print_btn)
+        
+        # View Analytics button with icon
+        analytics_btn = QPushButton("  " + UIHelper.translate("View Analytics"))
+        analytics_btn.setProperty("original_text", "  View Analytics")
+        analytics_btn.setIcon(QIcon.fromTheme("accessories-calculator", QIcon()))
+        analytics_btn.setIconSize(QSize(24, 24))
+        analytics_btn.clicked.connect(lambda: self.tab_widget.setCurrentIndex(3))  # Go to Reports tab
+        action_buttons_layout.addWidget(analytics_btn)
+        
+        actions_layout.addLayout(action_buttons_layout)
+        main_layout.addWidget(actions_card)
+        
+        # Recent Bills section
+        recent_card = QWidget()
+        recent_card.setObjectName("card")
+        recent_layout = QVBoxLayout()
+        recent_card.setLayout(recent_layout)
+        
+        recent_header = QHBoxLayout()
+        recent_title = QLabel(UIHelper.translate("Recent Bills"))
+        recent_title.setObjectName("card-title")
+        recent_title.setProperty("original_text", "Recent Bills")
+        recent_header.addWidget(recent_title)
+        
+        view_all_btn = QPushButton(UIHelper.translate("View All"))
+        view_all_btn.setProperty("original_text", "View All")
+        view_all_btn.setObjectName("text-button")
+        view_all_btn.clicked.connect(lambda: self.tab_widget.setCurrentIndex(2))  # Go to Manage Bills tab
+        recent_header.addWidget(view_all_btn)
+        
+        recent_layout.addLayout(recent_header)
+        
+        # Recent bills table
+        self.recent_bills_table = UIHelper.create_table(3, ["Date", "Name", "Price"])
+        self.recent_bills_table.setMaximumHeight(200)
+        recent_layout.addWidget(self.recent_bills_table)
+        
+        main_layout.addWidget(recent_card)
+        
+        # Set main layout spacing and margins
+        main_layout.setSpacing(20)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        
+        # Update dashboard stats whenever it's shown
+        self.tab_widget.currentChanged.connect(self.update_dashboard_if_needed)
+    
+    def update_dashboard_if_needed(self, tab_index):
+        """Update dashboard stats when dashboard tab is selected."""
+        if tab_index == 0:  # Dashboard is the first tab
+            self.update_dashboard_stats()
+            self.update_recent_bills_table()
+    
+    def update_dashboard_stats(self):
+        """Update the statistics displayed on the dashboard."""
+        # Get current month stats
+        current_month = datetime.now().month
+        current_year = datetime.now().year
+        
+        # Format dates for query
+        start_date = f"{current_month:02d}/01/{current_year}"
+        last_day = 30 if current_month in [4, 6, 9, 11] else 31
+        if current_month == 2:
+            last_day = 29 if current_year % 4 == 0 else 28
+        end_date = f"{current_month:02d}/{last_day}/{current_year}"
+        
+        # Get bills for current month
+        selected_year = str(current_year)
+        monthly_bills = self.db_manager.get_bills(selected_year, start_date, end_date)
+        
+        # Update bills count
+        bills_month_count = self.dashboard_page.findChild(QLabel, "stat-number", Qt.FindChildrenRecursively)
+        if bills_month_count:
+            bills_month_count.setText(str(len(monthly_bills)))
+        
+        # Calculate total spent
+        total_amount = 0.0
+        category_counts = {}
+        
+        for bill in monthly_bills:
+            # Extract price (remove $ and convert to float)
+            price_str = bill[2].replace('$', '').strip()
+            try:
+                price = float(price_str)
+                total_amount += price
+                
+                # Count categories
+                bill_name = bill[1]
+                for category in self.categories:
+                    if f"({category})" in bill_name:
+                        category_counts[category] = category_counts.get(category, 0) + 1
+                        break
+            except ValueError:
+                continue
+        
+        # Update total amount
+        total_month_amount = self.dashboard_page.findChildren(QLabel, "stat-number")[1]
+        if total_month_amount:
+            total_month_amount.setText(f"${total_amount:.2f}")
+        
+        # Update top category
+        top_category = max(category_counts.items(), key=lambda x: x[1])[0] if category_counts else "--"
+        top_category_name = self.dashboard_page.findChildren(QLabel, "stat-number")[2]
+        if top_category_name:
+            top_category_name.setText(top_category)
+    
+    def update_recent_bills_table(self):
+        """Update the recent bills table on the dashboard."""
+        self.recent_bills_table.setRowCount(0)
+        
+        # Get the most recent bills (limit to 5)
+        bills = self.db_manager.get_bills()
+        recent_bills = bills[-5:] if len(bills) > 5 else bills
+        
+        # Add the bills to the table in reverse order (newest first)
+        for bill in reversed(recent_bills):
+            row_count = self.recent_bills_table.rowCount()
+            self.recent_bills_table.insertRow(row_count)
+            self.recent_bills_table.setItem(row_count, 0, QTableWidgetItem(bill[0]))
+            self.recent_bills_table.setItem(row_count, 1, QTableWidgetItem(bill[1]))
+            self.recent_bills_table.setItem(row_count, 2, QTableWidgetItem(bill[2]))
+    
+    def perform_global_search(self):
+        """Perform a global search across all bills."""
+        search_text = self.global_search.text().lower()
+        if not search_text:
+            return
+            
+        # If on dashboard, update the recent bills table with search results
+        if self.tab_widget.currentIndex() == 0:
+            self.recent_bills_table.setRowCount(0)
+            
+            # Search in all years
+            all_bills = []
+            years = self.db_manager.get_existing_databases()
+            
+            # Add bills from present database
+            present_bills = self.db_manager.get_bills()
+            all_bills.extend(present_bills)
+            
+            # Add bills from year-specific databases
+            for year in years:
+                year_bills = self.db_manager.get_bills(year)
+                all_bills.extend(year_bills)
+            
+            # Filter bills by search text
+            filtered_bills = [bill for bill in all_bills if 
+                             search_text in bill[0].lower() or  # Date
+                             search_text in bill[1].lower() or  # Name
+                             search_text in bill[2].lower()]    # Price
+            
+            # Add filtered bills to table (limit to 10)
+            max_bills = min(10, len(filtered_bills))
+            for i in range(max_bills):
+                bill = filtered_bills[i]
+                row_count = self.recent_bills_table.rowCount()
+                self.recent_bills_table.insertRow(row_count)
+                self.recent_bills_table.setItem(row_count, 0, QTableWidgetItem(bill[0]))
+                self.recent_bills_table.setItem(row_count, 1, QTableWidgetItem(bill[1]))
+                self.recent_bills_table.setItem(row_count, 2, QTableWidgetItem(bill[2]))
+
+    def init_notification_system(self):
+        """Initialize the notification system for user feedback."""
+        self.notification_area = QLabel("")
+        self.notification_area.setObjectName("notification-area")
+        self.notification_area.setAlignment(Qt.AlignCenter)
+        self.notification_area.setFixedHeight(0)  # Hidden by default
+        self.notification_timer = QTimer(self)
+        self.notification_timer.timeout.connect(self.hide_notification)
+        
+        # Add to the main window
+        layout = QVBoxLayout()
+        layout.addWidget(self.notification_area)
+        layout.addWidget(self.tab_widget)
+        layout.setSpacing(0)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Create a central widget to hold the layout
+        central_widget = QWidget()
+        central_widget.setLayout(layout)
+        self.setCentralWidget(central_widget)
+        
+    def show_notification(self, message, type="info", duration=3000):
+        """Show a notification to the user.
+        
+        Args:
+            message: The notification message to display
+            type: The type of notification (info, success, warning, error)
+            duration: How long to show the notification (in milliseconds)
+        """
+        # Set notification style based on type
+        if type == "success":
+            self.notification_area.setStyleSheet("background-color: #d4edda; color: #155724; border-bottom: 1px solid #c3e6cb;")
+        elif type == "warning":
+            self.notification_area.setStyleSheet("background-color: #fff3cd; color: #856404; border-bottom: 1px solid #ffeeba;")
+        elif type == "error":
+            self.notification_area.setStyleSheet("background-color: #f8d7da; color: #721c24; border-bottom: 1px solid #f5c6cb;")
+        else:  # info
+            self.notification_area.setStyleSheet("background-color: #d1ecf1; color: #0c5460; border-bottom: 1px solid #bee5eb;")
+        
+        # Set message and show
+        self.notification_area.setText(message)
+        self.notification_area.setFixedHeight(40)
+        
+        # Start timer to hide notification
+        self.notification_timer.start(duration)
+    
+    def hide_notification(self):
+        """Hide the notification area."""
+        self.notification_area.setFixedHeight(0)
+        self.notification_timer.stop()
+
+    def init_manage_bills_page(self):
+        """Initialize the Manage Bills page, combining print and delete functionality."""
+        self.manage_bills_page = QWidget()
+        main_layout = QVBoxLayout()
+        self.manage_bills_page.setLayout(main_layout)
+        
+        # Create tabbed interface for different views
+        view_tabs = QTabWidget()
+        view_tabs.setDocumentMode(True)  # Make tabs look more modern
+        
+        # === Bills View ===
+        bills_view = QWidget()
+        bills_layout = QVBoxLayout()
+        bills_view.setLayout(bills_layout)
+        
+        # Card for filtering
+        filter_card = QWidget()
+        filter_card.setObjectName("card")
+        filter_layout = QVBoxLayout()
+        filter_card.setLayout(filter_layout)
+        
+        filter_title = QLabel(UIHelper.translate("Filter Bills"))
+        filter_title.setObjectName("card-title")
+        filter_title.setProperty("original_text", "Filter Bills")
+        filter_layout.addWidget(filter_title)
+        
+        # Date range with modern compact layout
+        date_controls = QHBoxLayout()
+        
+        date_label = QLabel(UIHelper.translate("Date Range:"))
+        date_label.setProperty("original_text", "Date Range:")
+        date_controls.addWidget(date_label)
+        
+        self.manage_start_date = UIHelper.create_date_input()
+        self.manage_start_date.setMaximumWidth(120)
+        date_controls.addWidget(self.manage_start_date)
+        
+        date_to_label = QLabel(UIHelper.translate("to"))
+        date_to_label.setProperty("original_text", "to")
+        date_controls.addWidget(date_to_label)
+        
+        self.manage_end_date = UIHelper.create_date_input()
+        self.manage_end_date.setMaximumWidth(120)
+        date_controls.addWidget(self.manage_end_date)
+        
+        self.apply_filter_btn = QPushButton(UIHelper.translate("Apply"))
+        self.apply_filter_btn.setProperty("original_text", "Apply")
+        self.apply_filter_btn.setMaximumWidth(100)
+        self.apply_filter_btn.clicked.connect(self.filter_manage_bills)
+        date_controls.addWidget(self.apply_filter_btn)
+        
+        date_controls.addStretch()
+        
+        # Category filter
+        category_controls = QHBoxLayout()
+        
+        category_label = QLabel(UIHelper.translate("Category:"))
+        category_label.setProperty("original_text", "Category:")
+        category_controls.addWidget(category_label)
+        
+        self.category_filter = QComboBox()
+        self.category_filter.addItem(UIHelper.translate("All Categories"))
+        for category in self.categories:
+            self.category_filter.addItem(category)
+        self.category_filter.currentIndexChanged.connect(self.filter_manage_bills)
+        category_controls.addWidget(self.category_filter)
+        
+        # Year selection
+        year_label = QLabel(UIHelper.translate("Year:"))
+        year_label.setProperty("original_text", "Year:")
+        category_controls.addWidget(year_label)
+        
+        self.manage_year_selector = QComboBox()
+        self.manage_year_selector.addItem("Present Database")
+        self.manage_year_selector.currentIndexChanged.connect(self.load_manage_bills)
+        category_controls.addWidget(self.manage_year_selector)
+        
+        category_controls.addStretch()
+        
+        filter_layout.addLayout(date_controls)
+        filter_layout.addLayout(category_controls)
+        bills_layout.addWidget(filter_card)
+        
+        # Card for bills table with actions
+        bills_card = QWidget()
+        bills_card.setObjectName("card")
+        bills_card_layout = QVBoxLayout()
+        bills_card.setLayout(bills_card_layout)
+        
+        # Table header with actions
+        table_header = QHBoxLayout()
+        
+        bills_title = QLabel(UIHelper.translate("Bills"))
+        bills_title.setObjectName("card-title")
+        bills_title.setProperty("original_text", "Bills")
+        table_header.addWidget(bills_title)
+        
+        # Action buttons in header
+        btn_layout = QHBoxLayout()
+        
+        self.print_selected_btn = QPushButton(UIHelper.translate("Print"))
+        self.print_selected_btn.setProperty("original_text", "Print")
+        self.print_selected_btn.setIcon(QIcon.fromTheme("document-print", QIcon()))
+        self.print_selected_btn.clicked.connect(self.print_bills)
+        btn_layout.addWidget(self.print_selected_btn)
+        
+        self.delete_selected_btn = QPushButton(UIHelper.translate("Delete"))
+        self.delete_selected_btn.setProperty("original_text", "Delete")
+        self.delete_selected_btn.setIcon(QIcon.fromTheme("edit-delete", QIcon()))
+        self.delete_selected_btn.setObjectName("danger-button")
+        self.delete_selected_btn.clicked.connect(self.delete_selected_bills)
+        btn_layout.addWidget(self.delete_selected_btn)
+        
+        table_header.addLayout(btn_layout)
+        bills_card_layout.addLayout(table_header)
+        
+        # Bills table with checkboxes for selection
+        self.manage_bills_table = QTableWidget(0, 4)  # Date, Name, Price, Select
+        headers = ["Date", "Name", "Price", ""]
+        translated_headers = [UIHelper.translate(header) for header in headers]
+        self.manage_bills_table.setHorizontalHeaderLabels(translated_headers)
+        self.manage_bills_table.setProperty("original_headers", headers)
+        self.manage_bills_table.horizontalHeader().setStretchLastSection(True)
+        self.manage_bills_table.setAlternatingRowColors(True)
+        self.manage_bills_table.setSelectionBehavior(QTableWidget.SelectRows)
+        
+        bills_card_layout.addWidget(self.manage_bills_table)
+        
+        bills_layout.addWidget(bills_card)
+        
+        
+        # Add views to the tabs
+        view_tabs.addTab(bills_view, UIHelper.translate("All Bills"))
+        
+        main_layout.addWidget(view_tabs)
+        
+        # Set up selection tracking
+        self.selected_bills = []
+        
+        # Load data when tab is shown
+        view_tabs.currentChanged.connect(self.on_manage_tab_changed)
+    
+    def on_manage_tab_changed(self, index):
+        """Handle changing between Bills and Photos tabs."""
+        if index == 0:  # Bills tab
+            self.load_manage_bills()
+        else:  # Photos tab
+            self.load_manage_photos()
+    
+    def load_manage_bills(self):
+        """Load bills into the manage bills table."""
+        self.manage_bills_table.setRowCount(0)
+        selected_year = self.manage_year_selector.currentText()
+        
+        bills = self.db_manager.get_bills(selected_year)
+        
+        for bill in bills:
+            row_count = self.manage_bills_table.rowCount()
+            self.manage_bills_table.insertRow(row_count)
+            self.manage_bills_table.setItem(row_count, 0, QTableWidgetItem(bill[0]))
+            self.manage_bills_table.setItem(row_count, 1, QTableWidgetItem(bill[1]))
+            self.manage_bills_table.setItem(row_count, 2, QTableWidgetItem(bill[2]))
+            
+            # Add checkbox for selection
+            checkbox = QCheckBox()
+            self.manage_bills_table.setCellWidget(row_count, 3, checkbox)
+    
+    def filter_manage_bills(self):
+        """Filter bills in the manage view by date range and category."""
+        start_date = self.manage_start_date.text()
+        end_date = self.manage_end_date.text()
+        selected_year = self.manage_year_selector.currentText()
+        selected_category = self.category_filter.currentText()
+        
+        # Get date-filtered bills
+        if start_date and end_date:
+            start_date, end_date = DateHelper.parse_date_range(start_date, end_date)
+            if start_date and end_date:
+                bills = self.db_manager.get_bills(selected_year, start_date, end_date)
+            else:
+                # Invalid date format, show all bills
+                bills = self.db_manager.get_bills(selected_year)
+                self.show_notification(UIHelper.translate("Invalid date format. Showing all bills."), "warning")
+        else:
+            # No date range, show all bills
+            bills = self.db_manager.get_bills(selected_year)
+        
+        # Filter by category
+        if selected_category != UIHelper.translate("All Categories"):
+            bills = [bill for bill in bills if f"({selected_category})" in bill[1]]
+        
+        # Update table
+        self.manage_bills_table.setRowCount(0)
+        for bill in bills:
+            row_count = self.manage_bills_table.rowCount()
+            self.manage_bills_table.insertRow(row_count)
+            self.manage_bills_table.setItem(row_count, 0, QTableWidgetItem(bill[0]))
+            self.manage_bills_table.setItem(row_count, 1, QTableWidgetItem(bill[1]))
+            self.manage_bills_table.setItem(row_count, 2, QTableWidgetItem(bill[2]))
+            
+            # Add checkbox for selection
+            checkbox = QCheckBox()
+            self.manage_bills_table.setCellWidget(row_count, 3, checkbox)
+    
+    def delete_selected_bills(self):
+        """Delete bills selected with checkboxes."""
+        selected_rows = []
+        
+        # Get all selected rows
+        for row in range(self.manage_bills_table.rowCount()):
+            checkbox = self.manage_bills_table.cellWidget(row, 3)
+            if checkbox and checkbox.isChecked():
+                selected_rows.append(row)
+        
+        if not selected_rows:
+            self.show_notification(UIHelper.translate("No bills selected."), "warning")
+            return
+        
+        # Confirm deletion
+        result = QMessageBox.question(
+            self,
+            UIHelper.translate("Confirm Deletion"),
+            UIHelper.translate(f"Delete {len(selected_rows)} selected bills?"),
+            QMessageBox.Yes | QMessageBox.No
+        )
+        
+        if result != QMessageBox.Yes:
+            return
+        
+        # Delete selected rows
+        selected_year = self.manage_year_selector.currentText()
+        deleted_count = 0
+        
+        # Delete in reverse order to avoid index shifting
+        for row in sorted(selected_rows, reverse=True):
+            date = self.manage_bills_table.item(row, 0).text()
+            name = self.manage_bills_table.item(row, 1).text()
+            price = self.manage_bills_table.item(row, 2).text()
+            
+            success = self.db_manager.delete_bill(selected_year, date, name, price)
+            
+            if success:
+                deleted_count += 1
+                self.manage_bills_table.removeRow(row)
+            
+        # Show success notification
+        if deleted_count > 0:
+            self.show_notification(
+                UIHelper.translate(f"Successfully deleted {deleted_count} bills."),
+                "success"
+            )
+        else:
+            self.show_notification(
+                UIHelper.translate("Failed to delete bills. Please try again."),
+                "error"
+            )
+    
+    def load_manage_photos(self):
+        """Load photos into the manage photos view."""
+        # Clear existing photos
+        self.clear_layout(self.photos_scroll_layout)
+        
+        # Get selected year
+        selected_year = None
+        if hasattr(self, 'manage_year_selector') and self.manage_year_selector.count() > 0:
+            selected_year = self.manage_year_selector.currentText()
+        
+        # Get all bill images
+        bill_images = self.db_manager.get_bill_images(selected_year)
+        
+        # Create a grid layout for photos
+        photo_grid = QGridLayout()
+        self.photos_scroll_layout.addLayout(photo_grid)
+        
+        # Add images to the grid
+        row, col = 0, 0
+        max_cols = 3  # Show 3 photos per row
+        
+        for date, image_filename in bill_images:
+            if image_filename:
+                image_path = os.path.join("bill_images", image_filename)
+                if os.path.exists(image_path):
+                    # Create a card for each photo
+                    photo_card = QWidget()
+                    photo_card.setObjectName("photo-card")
+                    card_layout = QVBoxLayout()
+                    photo_card.setLayout(card_layout)
+                    
+                    # Add date label
+                    date_label = QLabel(f"{UIHelper.translate('Date')}: {date}")
+                    date_label.setAlignment(Qt.AlignCenter)
+                    card_layout.addWidget(date_label)
+                    
+                    # Add image
+                    image_label = QLabel()
+                    pixmap = QPixmap(image_path)
+                    image_label.setPixmap(pixmap.scaled(250, 250, Qt.KeepAspectRatio))
+                    image_label.setAlignment(Qt.AlignCenter)
+                    card_layout.addWidget(image_label)
+                    
+                    # Add to grid
+                    photo_grid.addWidget(photo_card, row, col)
+                    
+                    # Move to next position
+                    col += 1
+                    if col >= max_cols:
+                        col = 0
+                        row += 1
+    
+    def filter_manage_photos(self):
+        """Filter photos by date range."""
+        start_date = self.photo_start_date.text()
+        end_date = self.photo_end_date.text()
+        
+        if start_date and end_date:
+            start_date, end_date = DateHelper.parse_date_range(start_date, end_date)
+            if not start_date or not end_date:
+                self.show_notification(UIHelper.translate("Invalid date format."), "warning")
+                return
+                
+            # Clear existing photos
+            self.clear_layout(self.photos_scroll_layout)
+            
+            # Get selected year
+            selected_year = None
+            if hasattr(self, 'manage_year_selector') and self.manage_year_selector.count() > 0:
+                selected_year = self.manage_year_selector.currentText()
+            
+            # Get filtered bill images
+            bill_images = self.db_manager.get_bill_images(selected_year, start_date, end_date)
+            
+            # Create a grid layout for photos
+            photo_grid = QGridLayout()
+            self.photos_scroll_layout.addLayout(photo_grid)
+            
+            # Add images to the grid
+            row, col = 0, 0
+            max_cols = 3
+            
+            for date, image_filename in bill_images:
+                if image_filename:
+                    image_path = os.path.join("bill_images", image_filename)
+                    if os.path.exists(image_path):
+                        # Create a card for each photo
+                        photo_card = QWidget()
+                        photo_card.setObjectName("photo-card")
+                        card_layout = QVBoxLayout()
+                        photo_card.setLayout(card_layout)
+                        
+                        # Add date label
+                        date_label = QLabel(f"{UIHelper.translate('Date')}: {date}")
+                        date_label.setAlignment(Qt.AlignCenter)
+                        card_layout.addWidget(date_label)
+                        
+                        # Add image
+                        image_label = QLabel()
+                        pixmap = QPixmap(image_path)
+                        image_label.setPixmap(pixmap.scaled(250, 250, Qt.KeepAspectRatio))
+                        image_label.setAlignment(Qt.AlignCenter)
+                        card_layout.addWidget(image_label)
+                        
+                        # Add to grid
+                        photo_grid.addWidget(photo_card, row, col)
+                        
+                        # Move to next position
+                        col += 1
+                        if col >= max_cols:
+                            col = 0
+                            row += 1
+        else:
+            self.show_notification(UIHelper.translate("Please enter both start and end dates."), "warning")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
