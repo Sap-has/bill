@@ -1,5 +1,5 @@
 from PyQt5.QtWidgets import (
-    QVBoxLayout, QGridLayout, QWidget, QPushButton, QHBoxLayout, QListWidget, QLabel
+    QVBoxLayout, QGridLayout, QWidget, QPushButton, QHBoxLayout, QListWidget, QLabel, QMainWindow
 )
 
 from PyQt5.QtGui import QIcon
@@ -8,7 +8,7 @@ from PyQt5.QtCore import Qt, QSize
 
 from util.uiHelper import UIHelper
 
-class bill:
+class bill(QMainWindow):
     def init_bill_page(self):
         """Initialize the Bill Entry tab with form and category selection."""
         self.bill_page = QWidget()

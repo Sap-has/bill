@@ -385,32 +385,6 @@ class BillTracker(QMainWindow):
             self.present_bill_table.setItem(row_count, 1, QTableWidgetItem(bill[1]))
             self.present_bill_table.setItem(row_count, 2, QTableWidgetItem(bill[2]))
     
-    def filter_photos_by_date(self):
-        """Filter photos by date range."""
-        start_date, end_date = DateHelper.parse_date_range(
-            self.photo_start_date_input.text(),
-            self.photo_end_date_input.text()
-        )
-        
-        if not start_date or not end_date:
-            # If invalid date range, show all photos
-            self.load_all_photos()
-            return
-            
-        self.clear_layout(self.scroll_layout)  # Clear existing images
-        
-        selected_year = self.photos_year_selector.currentText() if hasattr(self, 'photos_year_selector') else None
-        
-        # Get filtered bill images
-        bill_images = self.db_manager.get_bill_images(selected_year, start_date, end_date)
-        
-        # Add images to the photos page
-        for date, image_filename in bill_images:
-            if image_filename:
-                image_path = os.path.join("bill_images", image_filename)
-                if os.path.exists(image_path):
-                    self.add_image_to_photos_page(date, image_path)
-    
     def load_existing_databases(self):
         """Load existing year-specific databases into the selectors."""
         years = self.db_manager.get_existing_databases()

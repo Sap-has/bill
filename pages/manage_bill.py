@@ -1,14 +1,14 @@
 from PyQt5.QtWidgets import (
-    QVBoxLayout, QWidget, QPushButton, QHBoxLayout, QLabel, QComboBox, QTableWidget, QTabWidget
+    QVBoxLayout, QWidget, QPushButton, QHBoxLayout, QLabel, QComboBox, QTableWidget, QTabWidget, QMainWindow
 )
 
 from PyQt5.QtGui import QIcon
 
 from util.uiHelper import UIHelper
 
-class manageBill:
+class manageBill(QMainWindow):
     def init_manage_bills_page(self):
-        """Initialize the Manage Bills page, combining print and delete functionality."""
+        """Initialize the Manage Bills page, delete functionality."""
         self.manage_bills_page = QWidget()
         main_layout = QVBoxLayout()
         self.manage_bills_page.setLayout(main_layout)
@@ -136,7 +136,6 @@ class manageBill:
         bills_card_layout.addWidget(self.manage_bills_table)
         
         bills_layout.addWidget(bills_card)
-        
         
         # Add views to the tabs
         view_tabs.addTab(bills_view, UIHelper.translate("All Bills"))

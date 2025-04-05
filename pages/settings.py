@@ -1,10 +1,10 @@
 from PyQt5.QtWidgets import (
-    QVBoxLayout, QWidget
+    QVBoxLayout, QWidget, QMainWindow
 )
 
 from util.uiHelper import UIHelper
 
-class settings:
+class settings(QMainWindow):
     def init_settings_page(self):
         """Initialize the Settings tab for managing categories."""
         self.settings_page = QWidget()
@@ -30,3 +30,4 @@ class settings:
         # Category list layout (populated in update_settings_page)
         self.category_list_layout = QVBoxLayout()
         self.settings_layout.addLayout(self.category_list_layout)
+        

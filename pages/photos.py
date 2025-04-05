@@ -1,14 +1,15 @@
 import os
 from PyQt5.QtWidgets import (
-    QVBoxLayout, QWidget, QComboBox, QHBoxLayout, QScrollArea, QLabel
+    QVBoxLayout, QWidget, QComboBox, QHBoxLayout, QScrollArea, QLabel, QMainWindow
 )
 
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtCore import Qt
 
+from util.dateHelper import DateHelper
 from util.uiHelper import UIHelper
 
-class photos:
+class photos(QMainWindow):
     def init_photos_page(self):
             """Initialize the Photos tab for viewing bill images."""
             self.photos_page = QWidget()
@@ -84,3 +85,29 @@ class photos:
         image_label.setPixmap(pixmap.scaled(400, 400, Qt.KeepAspectRatio))
         self.scroll_layout.addWidget(QLabel(f"Date: {date}"))
         self.scroll_layout.addWidget(image_label)
+    
+    def filter_photos_by_date(self):
+        """Filter photos by date range."""
+        start_date, end_date = DateHelper.parse_date_range(
+            self.photo_start_date_input.text(),
+            self.photo_end_date_input.text()
+        )
+        
+        if not start_date or not end_date:
+            # If invalid date range, show all photos
+            self.load_all_photos()
+            return
+            
+        self.clear_layout(self.scroll_layout)  # Clear existing images
+        
+        selected_year = self.photos_year_selector.currentText() if hasattr(self, 'photos_year_selector') else None
+        
+        # Get filtered bill images
+        bill_images = self.db_manager.get_bill_images(selected_year, start_date, end_date)
+        
+        # Add images to the photos page
+        for date, image_filename in bill_images:
+            if image_filename:
+                image_path = os.path.join("bill_images", image_filename)
+                if os.path.exists(image_path):
+                    self.add_image_to_photos_page(date, image_path)

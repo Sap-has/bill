@@ -1,10 +1,10 @@
 from PyQt5.QtWidgets import (
-    QVBoxLayout, QWidget, QComboBox
+    QVBoxLayout, QWidget, QComboBox, QMainWindow
 )
 
 from util.uiHelper import UIHelper
 
-class data:
+class data(QMainWindow):
     def init_data_page(self):
             """Initialize the Data tab for viewing monthly expenditure."""
             self.data_page = QWidget()
